@@ -7,18 +7,21 @@
 // 原理（MCP, Multi-Cycle Path formulation）：
 //   数据总线本身**不加任何同步器**，只靠协议保证 dst 采样时它已经稳定了很久：
 //     1. src 把数据锁进 data_q，然后翻转 req。
-//     2. req 经两级同步到达 dst，dst 做边沿检测 —— 此时 data_q 至少已稳定
-//        2 个 dst 周期，可以安全直接采样。
+//     2. req 经两级同步到达 dst，dst 做边沿检测 —— 此时控制链提供了数据稳定窗口；
+//        仍需约束数据物理延迟在最早捕获时刻之前完成。
 //     3. dst 采样后翻转 ack，ack 同步回 src，src 才允许更新下一个数据。
-//   因此 data_q -> dst 的这条路径是一条真正的多周期路径。
+//   这是异步 bundled-data 握手，不应直接套用同步时钟的 multicycle 例外。
 //
 // 约束（必须写进 SDC，否则时序工具会按单周期去修它，或者更糟：漏掉它）：
-//   set_max_delay -datapath_only <src_period> -from [get_pins data_q_reg*/C] \
-//                                             -to   [get_pins data_s_reg*/D]
+//   set_max_delay -datapath_only <derived_capture_budget> -from [get_pins data_q_reg*/C] \
+//                                             -to   [get_pins dst_data_reg*/D]
 //   set_false_path 是常见但更粗糙的做法：它完全放弃约束，数据可能晚到得离谱。
 //
 // 代价：一次传输要往返 4~6 个周期，吞吐低。需要连续高吞吐请用 async_fifo。
 // -----------------------------------------------------------------------------
+// 复位契约：两域协调复位并丢弃在途数据/事件，各域同步释放；恢复前保持输入无效。
+// 不支持传输中任意单侧复位：可能产生伪事件、丢数或握手卡死。
+// CDC 物理约束与复位细节见 references/06-clock-reset-cdc.md。
 `default_nettype none
 
 module handshake_mcp #(
@@ -75,7 +78,7 @@ module handshake_mcp #(
         end
     end
 
-    // 采样 data_q：此刻它已稳定至少两个 dst 周期
+    // 采样 data_q：握手保持数据，物理约束保证其在此沿之前稳定
     always @(posedge dst_clk or negedge dst_rst_n) begin
         if (!dst_rst_n) begin
             dst_valid <= 1'b0;

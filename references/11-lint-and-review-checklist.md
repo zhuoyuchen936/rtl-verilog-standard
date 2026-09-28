@@ -405,21 +405,16 @@ python3 scripts/rtl_lint.py --top soc_top --synth \
 | D4 | `casez` 是否也该禁 | Cummings：casez *"use sparingly and cautiously"* ↔ Mills SNUG 2012：*"The SystemVerilog casez and casex types of case statements have an **inherent** simulation/synthesis mismatch."* → 有人据此主张 casez 也禁 | `casex` 禁；`casez` 谨慎且只用 `?`；`[SV]` 优先 `case ... inside` |
 | D5 | FSM 两段式 vs 三段式 | lowRISC：*"must be implemented with two process blocks"* ↔ 教材 p.168-173 与 Cummings 的三段式 | 主规范 F1 取**三段式**（输出寄存，避免组合输出毛刺跨模块）。两段式不是错，但同一项目不要混 |
 | D6 | `always @*` vs `[SV]` `always_comb` | 两者敏感表语义**真的不同**：`always_comb` 排除块内被写的变量，`@*` 不排除（IEEE 1364-2005 §9.7.5 Example 2 ↔ IEEE 1800 §9.2.2.2.1） | `[V2001]` 用 `@*`，`[SV]` 用 `always_comb`。**迁移时必须配回归仿真**，"先读后写"的代码会静默改行为 |
-| D7 | `-Wall` 的 `UNUSEDSIGNAL`/`DECLFILENAME` | OpenTitan 作为硬门禁 ↔ 参数化 IP / 生成代码里噪声极大 | `-Wall` 全开 + 用 `.vlt` 按目录关掉这两条；`WIDTH`/`LATCH`/`MULTIDRIVEN`/`CASEINCOMPLETE`/`BLKSEQ`/`COMBDLY` 一律不许豁免 |
+| D7 | `-Wall` 的 `UNUSEDSIGNAL`/`DECLFILENAME` | OpenTitan 作为硬门禁 ↔ 参数化 IP / 生成代码里噪声极大 | `-Wall` 全开 + 用 `.vlt` 按目录关掉这两条；正确性警告先修复；刻意 latch、厂商 RAM、TB 等例外按主入口最小范围豁免 |
 
 ---
 
-## ⚠️ 与主规范的冲突
+## 维护状态
 
-**没有发现规则层面的冲突。** 本篇的每一条都是 `SKILL.md` 铁律的展开。以下三点是**执行细节的补充/待确认项**，不是推翻主规范，列出来供上层裁决：
-
-1. **`rtl_lint.py` 的"通过"判据依赖 Verilator 的默认致命行为。** 脚本只在解析到 `%Error` 时才判失败；Verilator 默认把 warning 当致命错误（会额外打印一条 `%Error: Exiting due to N warning(s)`），所以实际效果与主规范 §2 "输出必须是 `通过 ✔`" 一致。但这层耦合是隐式的 —— **建议 CI 一律加 `--strict`**，把"告警也算失败"写死，不依赖工具默认值。
-
-2. **主规范 §2 只示范了内联 `lint_off` 一种豁免方式**，没有提第三方 IP 的 `.vlt` 控制文件。本篇 §3 补上了，并说明它同样满足主规范"最小范围 + 写明理由"的要求（`.vlt` 支持 `-file`/`-lines` 精确定位）。这是扩展，不是修改。另注：`rtl_lint.py` 的 `--verilator-arg` **不做 Windows→WSL 路径转换**，传 `.vlt` 时请用相对路径 —— 是否要给脚本加一个专门的 `--waiver` 选项（带路径转换），请上层决定。
-
-3. **主规范 F 节的教材引用与教材 p.329 的示例不一致（教材自身的问题，不是主规范的问题）。** 教材 p.329 `seqdet.v` 的状态寄存块用的是 `casex(state)`，而主规范 G5 明令禁止 `casex`。本篇 §1.5 已按主规范执行并注明"本规范不采纳教材这个写法"。如需在 `13-xiayuwen-source.md` 里也标注这处，请上层统一处理。
-
----
+规则 A–I 已移到 `15-coding-rules.md`；适用范围与例外以 `SKILL.md` 为准。
+脚本现直接检查 Verilator 退出码，`--strict` 可同时把非致命警告判失败；
+已有专用 `--waiver` 参数并保留 WSL 路径转换。审查先看正确性，检查强度按实际改动选择。
+历史教材 `casex` 示例不作为新 RTL 推荐写法。
 
 ## 本篇检查清单
 

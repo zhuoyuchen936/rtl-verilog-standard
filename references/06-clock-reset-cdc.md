@@ -192,62 +192,49 @@ assign q_sync = sync_q[1];
 | **MCP 握手** | 更新不频繁（配置寄存器、状态快照） | `handshake_mcp.v` |
 | **异步 FIFO** | 连续高吞吐数据流 | `async_fifo.v` |
 
-格雷码之所以能直接打两拍，是因为**相邻两个值只差 1 bit**，采样撞在翻转瞬间时，
-采到的要么是旧值要么是新值，不会出现第三种。这是多 bit 唯一可以直接同步的情形。
+Gray 编码只在相邻源更新中变化一位；源端需寄存且逐步递增。仍须约束到接收域
+第一级同步器的路径延迟和总线 skew，避免不同次更新在物理路径上交叠。
+接收域可以跳过中间计数；同步器仅降低亚稳态传播概率，不提供绝对保证。
 
-### R-06-13 MCP 握手要配 SDC 约束 `[通用]`
+### R-06-13 MCP、Gray 总线和约束优先级
 
-`handshake_mcp.v` 的数据总线**不加任何同步器**，靠协议保证 dst 采样时它已稳定很久。
-但时序工具不知道这件事，必须显式告诉它：
+`handshake_mcp.v` 从 `data_q` 到 `dst_data` 的数据在 req/ack 往返期间保持。
+最大数据延迟应从控制同步链的最早捕获时刻、两个时钟的关系和实现裕量推导，
+不能机械套用源时钟周期。它是异步 bundled-data 传输，不应直接套用同步 multicycle 例外。
 
-寄存器名必须与 `handshake_mcp.v` 里的**实际信号名**对应，否则约束会静默匹配为空
-（`get_cells` 匹配不到任何对象时不报错，工具照常跑完，你以为约束上了其实没有）：
+Vivado 中 `set_clock_groups` 和同路径的 `set_false_path` 会覆盖 `set_max_delay`。
+若同一时钟对有 MCP/Gray 数据路径需要最大延迟约束，不要整域切断，再试图用 max delay 补回。
+对其他允许放弃 setup/hold 分析的跨域路径施加局部例外；保留同步链后续级的同域时序分析。
 
-| 模板信号 | 综合后典型 cell 名 |
-|---|---|
-| `data_q`（源域锁存的数据） | `data_q_reg*` |
-| `dst_data`（目的域采样寄存器） | `dst_data_reg*` |
-
-```tcl
-# 推荐：限定最大延迟，保证数据比 req 先到
-set_max_delay -datapath_only <src_clk_period> \
-    -from [get_cells u_handshake/data_q_reg*] \
-    -to   [get_cells u_handshake/dst_data_reg*]
-
-# 常见但更粗糙：完全放弃约束，数据可能晚到得离谱
-# set_false_path -from ... -to ...
-```
-
-**写完必须验证约束真的匹配上了**：
+示意（`cdc_budget_ns` 由具体握手时序推导；对象名以综合网表为准）：
 
 ```tcl
-# 返回空列表就说明名字写错了
-llength [get_cells u_handshake/data_q_reg*]
-report_timing -from [get_cells u_handshake/data_q_reg*] -to [get_cells u_handshake/dst_data_reg*]
+set src_regs [get_cells -hier -filter {NAME =~ */u_handshake/data_q_reg*}]
+set dst_regs [get_cells -hier -filter {NAME =~ */u_handshake/dst_data_reg*}]
+if {[llength $src_regs] == 0 || [llength $dst_regs] == 0} {
+    error "CDC endpoints did not match the synthesized design"
+}
+set_max_delay -datapath_only $cdc_budget_ns -from $src_regs -to $dst_regs
+report_timing -from $src_regs -to $dst_regs
+report_exceptions -ignored
 ```
 
-### R-06-13b 本篇涉及的最小 SDC 约束集 `[通用]`
+Gray 指针的 skew 预算应按源更新间隔和接收采样要求确定；Vivado 可用 `set_bus_skew`
+并配最大数据延迟。`set_bus_skew` 独立于路径时序例外，不能据此认为 max delay 也未被覆盖。
+只在没有这类有界延迟需求、且已验证 CDC 结构的时钟对上使用整域异步分组。
 
-RTL 写得再规范，没有约束也签核不了。跨时钟域相关的最小集合：
+参考：[AMD UG903 异步约束](https://docs.amd.com/r/en-US/ug903-vivado-using-constraints/Constraining-Asynchronous-Signals)、
+[UG903 Gray 总线实例](https://docs.amd.com/r/en-US/ug903-vivado-using-constraints/set_bus_skew-Example-Two)、
+[UG835 set_bus_skew](https://docs.amd.com/r/en-US/ug835-vivado-tcl-commands/set_bus_skew)。核对日期：2026-09-28。
 
-```tcl
-# 1) 每个时钟源都要声明
-create_clock -name clk_a -period 10.000 [get_ports clk_a]
-create_clock -name clk_b -period 7.500  [get_ports clk_b]
+### R-06-13b 模板复位契约与约束范围
 
-# 2) 异步时钟之间必须解耦，否则工具会去修一条本就不该修的路径
-set_clock_groups -asynchronous -group {clk_a} -group {clk_b}
+`pulse_sync`、`handshake_mcp`、`async_fifo` 均要求两域协调复位，丢弃在途数据/事件，
+各自同步释放，恢复前禁止新事务。单侧复位可能造成伪脉冲、丢失请求、FIFO 指针不一致或死锁。
+若系统要求任意单侧复位，需增加重同步/初始化握手协议，并验证 RDC 和复位中的事务行为。
 
-# 3) 同步器的第一级不必满足 setup（两级同步器本就是用来吃亚稳态的）
-#    Vivado 上更推荐直接在 RTL 打 ASYNC_REG，然后：
-set_false_path -to [get_cells -hier -filter {NAME =~ *sync_q_reg[0]*}]
-
-# 4) MCP 握手的数据路径：见上
-```
-
-> ⚠️ **本规范对 SDC 的覆盖只到"与 CDC 直接相关的部分"**。
-> `create_generated_clock`、IO delay、multicycle path、时序例外的完整方法学不在本规范范围内，
-> 这是一处**已知缺口**，请以项目的时序约束规范为准。
+本篇只覆盖与 CDC 直接相关的约束。基本时钟、generated clock、IO delay 和完整时序例外
+应采用项目 XDC/SDC；不得把示例当成能直接签核的约束文件。
 
 ### R-06-14 异步 FIFO 的满空判断必须"保守" `[通用]`
 

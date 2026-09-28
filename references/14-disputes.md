@@ -709,7 +709,7 @@ always @(posedge gclk) q <= d;
 1. **自有代码 + 单点问题 → 内联 `lint_off`/`lint_on`**，成对出现、范围最小、注释写清理由。这是 `SKILL.md` §2 给出的示例形态。
 2. **第三方代码、自动生成代码、或需要审计留痕 → 用 `.vlt` 控制文件集中豁免**，并作为**第一个**文件传给 Verilator。集中文件同样满足"最小范围 + 写明理由"，不与 `SKILL.md` §2 冲突。
 3. **`-Wall` 全开作为 CI 硬门禁**；只允许用 `.vlt` 对特定目录关掉 `UNUSEDSIGNAL` / `DECLFILENAME`。
-4. **以下告警一律不许豁免**：`WIDTH` / `LATCH` / `MULTIDRIVEN` / `CASEINCOMPLETE` / `BLKSEQ` / `COMBDLY`。这六条对应的正是本规范的铁律（位宽、锁存器、多驱动、case 完整性、阻塞/非阻塞误用）。
+4. **以下正确性告警优先修复；刻意 latch、厂商 RAM、TB 等例外须按主入口限定范围并说明理由**：`WIDTH` / `LATCH` / `MULTIDRIVEN` / `CASEINCOMPLETE` / `BLKSEQ` / `COMBDLY`。这六条对应的正是本规范的铁律（位宽、锁存器、多驱动、case 完整性、阻塞/非阻塞误用）。
 5. **绝不在命令行上全局 `-Wno-XXX`**（`SKILL.md` §2 已明令）。
 6. 用 `--waiver-output` 半自动生成豁免文件时，**必须人工审阅**后再入库。
 

@@ -9,7 +9,7 @@
 ## 本篇速览
 
 1. **默认入口只有一条命令**：`python3 scripts/rtl_lint.py --top <top> --synth <file>.v`。它在 Windows 上会自动经 WSL 调用 verilator/yosys，输出必须是 `通过 ✔`。
-2. **Windows 上第一次跑必踩的坑**：脚本输出中文，控制台是 cp1252/GBK 时会 `UnicodeEncodeError` 崩在第一行。先 `$env:PYTHONIOENCODING='utf-8'`。`[工具]` 实测。
+2. **Windows 编码**：脚本已对 stdout/stderr 设置 UTF-8；其他 Python 工具仍可能需要 `PYTHONIOENCODING=utf-8`。
 3. **lint 的语义层永远是 `verilator --lint-only -Wall`**；风格层用 Verible/svlint；结构层用 `yosys proc+check`；三层分工，谁也替代不了谁 `[业界]` OpenTitan。
 4. **豁免警告只有三种合法姿势**，优先级从高到低：改代码 > 最小范围行内 `lint_off/lint_on` > `.vlt` 控制文件。命令行 `-Wno-XXX` 一律视为审查不通过。
 5. **`.f` 文件只写"可移植交集"**：源文件路径 + `+incdir+` + `+define+`。`-g2012`、`-Wall`、`--top-module` 这类工具特有 flag 放命令行，否则换个工具就报未知参数。
@@ -22,14 +22,14 @@
 
 ### 0.1 它是什么 `[工具]` `[通用]`
 
-本 skill 自带的一层薄封装，把两个引擎的调用、Windows/WSL 路径转换、输出摘要合并成一条命令。**这是本规范唯一强制的提交前动作**（SKILL.md §2）。
+本 skill 自带的一层薄封装，把两个引擎的调用、Windows/WSL 路径转换、输出摘要合并成一条命令。优先采用项目已有入口；本脚本适合工具支持的独立 RTL（见 SKILL.md §3）。
 
 | 引擎 | 实际执行的命令 | 查什么 | 为什么不能省 |
 |---|---|---|---|
 | Verilator | `--lint-only -Wall [+ -sv/--top-module/-I/+define+/waiver]` | 语法、位宽、敏感表、latch、未驱动/未使用、case 覆盖、文件名≠模块名 | 源码级、秒回、覆盖面最广 |
-| Yosys | `read_verilog → hierarchy -check → proc → opt -purge → check -assert → stat` | **真正被推断出来的** latch（`$dlatch`）、多驱动网、组合环，以及单元数量 | `always` 块只有在 `proc` 之后才展开成寄存器和 MUX，**latch 到这一步才现形**；纯 linter 会漏 |
+| Yosys | `read_verilog → hierarchy -check → proc → select -assert-none（latch 单元）→ opt -purge → check -assert → stat` | **真正被推断出来的** latch（`$dlatch`）、多驱动网、组合环，以及单元数量 | `always` 块只有在 `proc` 之后才展开成寄存器和 MUX，**latch 到这一步才现形**；纯 linter 会漏 |
 
-`--synth` 才启用 Yosys 那一半。**只跑 verilator 不算跑完。**
+`--synth` 才启用 Yosys 那一半。未加该选项时只报告 lint；若目标设计不兼容 Yosys，改用项目综合流程并说明覆盖范围。
 
 ### 0.2 用法 `[工具]` `[通用]`
 
@@ -47,7 +47,7 @@ python3 scripts/rtl_lint.py --top counter --synth --strict rtl/counter.v   # CI 
 Windows PowerShell（脚本自动探测 WSL，**不需要**你手写 `wsl`）：
 
 ```powershell
-$env:PYTHONIOENCODING = 'utf-8'      # 必须，理由见 0.3
+$env:PYTHONIOENCODING = 'utf-8'      # 对其他 Python 工具可选；本脚本已设 UTF-8
 python scripts\rtl_lint.py --top fsm_3seg --synth assets\templates\v2001\fsm_3seg.v
 python scripts\rtl_lint.py --top fifo_sync --sv --synth --distro Ubuntu rtl\fifo_sync.sv
 ```
@@ -65,7 +65,7 @@ No latch inferred for signal `\fsm_3seg.\next_state' ...
 结论: 通过 ✔
 ```
 
-会读这份输出的人应该注意 `$adff 3`：三段式状态机 + 异步复位，触发器数量与手算一致；如果这里冒出 `$dlatch`，就是组合块漏了赋值。**`stat` 是最便宜的"电路和我想的一样吗"检查。**
+会读这份输出的人应该注意 `$adff 3`：三段式状态机 + 异步复位，这是 3 个寄存器单元（可能各含多位），不是 3 个触发器位；如果这里冒出 `$dlatch`，就是组合块漏了赋值。**`stat` 是最便宜的"电路和我想的一样吗"检查。**
 
 `[工具]` **macOS 复测**（Apple Silicon，Verilator 5.050 + Yosys 0.68 原生，无 WSL）：
 同一个 `fsm_3seg.v` 得到**完全相同**的 `No latch inferred` 与 `$adff 3`，结论同为「通过 ✔」。
@@ -78,13 +78,13 @@ No latch inferred for signal `\fsm_3seg.\next_state' ...
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
-| 第一行就 `UnicodeEncodeError: 'charmap' codec can't encode` | 脚本打印中文，Windows Python 默认按控制台代码页（cp1252/cp936）编码 stdout | `$env:PYTHONIOENCODING='utf-8'`（或 `chcp 65001`）。**实测踩过，必现** |
+| 第一行就 `UnicodeEncodeError: 'charmap' codec can't encode` | 脚本打印中文，Windows Python 默认按控制台代码页（cp1252/cp936）编码 stdout | 脚本已内建 UTF-8 重配置；旧版或外部工具可设 `PYTHONIOENCODING=utf-8` |
 | `找不到 verilator` | WSL 里没装 | `wsl -- sudo apt install verilator yosys` |
-| `--inc` 目录里的 `` `include `` 在 `--synth` 阶段找不到 | **脚本只把 `--inc`/`--define` 传给 verilator，没有传给 yosys**（`run_yosys` 只收 files/top/sv） | 带 include 的设计先只跑 verilator 段，Yosys 段改用自己的 `.ys` 脚本（§5） |
+| 宏/include 配置 | `--inc` 和 `--define` 现已传给两个引擎 | Yosys 使用 Tcl 参数列表保留空格；需带 Tcl 支持的 Yosys 构建 |
 | 想用 `.f` filelist | 脚本只接受**文件列表**，不认 `-f` | 自己展开，见下方 PowerShell 片段 |
 | 想加 verilator 原生 flag | 用 `--verilator-arg=` **等号形式** | `--verilator-arg=--timing`；写成空格形式会被脚本自己的 argparse 吃掉 |
 
-把 `.f` 展开成文件列表（PowerShell；过滤掉注释行和 `+incdir+`/`+define+` 行）：
+以下仅适用于**纯源文件清单**，路径需已相对当前目录。含 `+incdir+`、`+define+`、嵌套清单或空格路径时使用项目构建入口；不得静默丢弃这些选项。PowerShell 示例：
 
 ```powershell
 $srcs = Get-Content rtl\rtl.f | Where-Object { $_.Trim() -ne '' -and $_ -notmatch '^\s*(//|#|\+)' }
@@ -117,7 +117,7 @@ python3 scripts/rtl_lint.py --top soc_top --synth ${=srcs}
 
 - Verilator **默认把 warning 当致命错误**并以非零码退出（这正是官方 `-Wno-fatal` "Disable fatal exit on warnings" 存在的理由，`[业界]` W06/S1）。因此**只要有一条 warning，就不会打印 `通过 ✔`**。
 - `--strict` 的意义在于：当你用 `--verilator-arg=-Wno-fatal` 摸底遗留代码时，把 warning 重新变成失败。
-- Yosys 段：`check -assert` 返回非零，或输出里出现 `$dlatch`，都会让脚本判失败。
+- Yosys 段：实际 latch 单元触发 `select -assert-none`，或 `check -assert` 返回非零，均判失败；不再根据日志关键字猜测。任何 Verilator 非零退出（包括无标准诊断的崩溃）均判失败。
 
 ### 0.5 它**不**做什么
 
@@ -592,10 +592,10 @@ stat
 write_verilog -noattr build/syn/soc_top_gate.v
 ```
 
-- **`hierarchy` 必须是加载设计后的第一条命令**（官方原话："`hierarchy` should always be the first command after loading a design"）——因为 `read_verilog` 默认 `-defer`，只建 AST，实际编译推迟到 `hierarchy`。
+- **`hierarchy` 必须是加载设计后的第一条命令**（官方原话："`hierarchy` should always be the first command after loading a design"）——用于解析层次与参数化实例；`-defer` 是可选参数，不是默认值。
 - `read_verilog` **自动定义宏 `SYNTHESIS`**（`-formal` 时改为 `FORMAL`），并且**永远定义 `YOSYS`**。这与 Vivado/DC 的习惯一致，所以 `` `ifndef SYNTHESIS `` 包住的仿真代码在 Yosys 下同样被排除。
 - `proc` 把 `always` 展开成寄存器/MUX；**latch 只有在这一步之后才现形**——这是 `rtl_lint.py --synth` 存在的全部理由。
-- `stat` 给单元统计：`$adff`/`$dff` 数量应与手算的触发器数一致；出现 `$dlatch` 就是组合块漏赋值；出现意外的 `$mem` 说明被推断成了存储器。
+- `stat` 给单元统计：`$adff`/`$dff` 是向量单元，需结合 WIDTH 参数核对寄存器位数；出现 `$dlatch` 就是组合块漏赋值；出现意外的 `$mem` 说明被推断成了存储器。
 
 `[工具]` 实测（Yosys 0.33，`assets/templates/v2001/fsm_3seg.v`）：`proc` 阶段打印 `No latch inferred for signal '\next_state'`，`stat` 给出 `$adff 3 / $eq 3 / $mux 2 / $pmux 1`——三段式 FSM 的状态寄存器 + 输出寄存器，与手算一致。**这一行 `No latch inferred` 就是三段式写法值不值的直接证据。**
 
@@ -829,7 +829,7 @@ CI 必须归档的产物：`build/reports/*.rpt`（时序/资源/CDC）、lint �
 | # | 分歧 | 各方立场 | 本规范默认 |
 |---|---|---|---|
 | 1 | 豁免用**行内 `lint_off`** 还是**集中 `.vlt`** | 内联：离代码最近、读代码就知道原因，但**会向下传播到 include 树**且容易忘 `lint_on`；集中（OpenTitan `lint/<ip>.vlt`）：源码零污染、可审计，但行号型 waiver 易失效 | **自有代码单点问题 → 内联；第三方/生成代码、需审计留痕 → `.vlt`**。双方唯一共识：**绝不用全局 `-Wno-XXX`** |
-| 2 | `-Wall` 是否作 CI 硬门禁 | 支持（OpenTitan：不 lint-clean 不许合并）；反对：`UNUSEDSIGNAL`/`DECLFILENAME` 在参数化 IP 与生成代码上噪声大 | **`-Wall` 全开**，只允许用 `.vlt` 对特定目录关掉这两条；`WIDTH`/`LATCH`/`MULTIDRIVEN`/`CASEINCOMPLETE`/`BLKSEQ`/`COMBDLY` **一律不许豁免** |
+| 2 | `-Wall` 是否作 CI 硬门禁 | 支持（OpenTitan：不 lint-clean 不许合并）；反对：`UNUSEDSIGNAL`/`DECLFILENAME` 在参数化 IP 与生成代码上噪声大 | **`-Wall` 全开**，只允许用 `.vlt` 对特定目录关掉这两条；正确性警告优先修复；刻意 latch、厂商双口 RAM、TB 时钟等例外按主入口最小范围豁免，不能隐藏未解决缺陷 |
 | 3 | `unique`/`priority` 能否替代 `default` | "还要写"：`unique` 只在仿真期检查，综合器当 don't-care，缺 `default` 会仿真/综合不匹配；"不用写"：`unique` 已表达意图 | **一律写 `default`**（与铁律 C4/F4 一致）。另注：**Verilator 是二态仿真器，跑通它不能证明 casex/casez 的 X 语义安全** |
 | 4 | Vivado 工程模式 vs 非工程模式 | 非工程：可复现、CI 友好，但 IP Integrator/Block Design 需额外脚本化；工程：GUI 与 IP Catalog 开箱即用，但 `.xpr` 含绝对路径 | **非工程模式**；重度用 BD 的项目取折中：**用 Tcl 生成工程**，`.xpr` 仍不进库 |
 | 5 | filelist 手写 `.f` vs FuseSoC/Bender/Bazel | `.f`：零依赖、任何工具都吃、模型最容易生成，但无依赖解析与版本管理；FuseSoC：一份 `.core` 驱动 lint/sim/syn 全后端，但多一层抽象 | **单仓库工程 → `.f` + Makefile**；多 IP 复用 → FuseSoC/Bender |
@@ -844,7 +844,7 @@ CI 必须归档的产物：`build/reports/*.rpt`（时序/资源/CDC）、lint �
 
 - [ ] `python3 scripts/rtl_lint.py --top <top> --synth <files>` 输出 **`通过 ✔`**（SV 加 `--sv`）
 - [ ] Windows 上已设 `$env:PYTHONIOENCODING='utf-8'`
-- [ ] Yosys `stat` 里**没有** `$dlatch`；`$dff`/`$adff` 数量与手算的触发器数一致
+- [ ] Yosys `stat` 里**没有** `$dlatch`；`$dff`/`$adff` 的 WIDTH 与实例数合计符合预期寄存器位数
 - [ ] 命令行里**没有** `-Wno-XXX`、`-Wno-fatal`
 - [ ] 新增的 `lint_off` 都是成对的、最小范围的，且旁边写了理由；**不在头文件顶部**
 - [ ] `.f` 里只有源文件路径、`+incdir+`、`+define+`
@@ -874,11 +874,13 @@ CI：
 
 ---
 
-## ⚠️ 与主规范的冲突
+## 维护状态与边界
 
-**没有发现实质冲突。** 本篇与 SKILL.md 的对应关系是展开与工具化：§1.3 的 warning 表逐条映射到铁律 A/C/D/E/G/H；§1.4 的三种作用域是 SKILL.md §2「豁免 lint 规则的唯一正确姿势」的完整版；§0 的 `rtl_lint.py` 就是 SKILL.md §2 的强制动作。
+2026-09-28：已修复 Verilator 退出码、Yosys include/define 透传、路径转义和 latch 判据。
+脚本仍不直接解析 filelist，Yosys 内置前端仍只支持部分 SV，Tcl 功能需可用。
+Windows/WSL 路径逻辑沿用，本次未在 Windows 重跑；本机验证范围见 `assets/VERIFICATION.md`。
+Quartus 的历史二手引用仍需按所用版本核对。历史 Wxx 索引对应的 `_research` 不随本 skill 分发。
 
-需要上层知晓的两点（不是冲突，是**边界说明**）：
-
-1. **SKILL.md §2 说"输出必须是 `通过 ✔`"，但 `rtl_lint.py` 的 Yosys 段有两条已知能力缺口**：`--inc` / `--define` 只传给 verilator、不传给 yosys（带 `` `include `` 的设计 `--synth` 可能读不进去），且不支持 `-f` filelist。本篇 §0.3 已如实写出并给了绕行方案。**若上层希望"通过 ✔"是无条件可信的，需要给脚本补这两个参数的透传。**
-2. **本篇对 Quartus 一节整体标注了「需本地二次核对」**，因为调研时 Intel/Altera 三个域名全部 403。这与"不要编造"的要求一致，但意味着 `[FPGA]`(Intel) 用户拿到的命令可信度低于 Vivado 部分。转抄时请保留该标注。
+当前命令行为参考：[Verilator 参数](https://verilator.org/guide/latest/exe_verilator.html)、
+[Yosys 前端](https://yosyshq.readthedocs.io/projects/yosys/en/latest/cmd/index_frontends.html)。
+本机版本与在线文档版本可能不同，以实际安装的 `--help`/`help` 和验证记录为准。

@@ -57,14 +57,14 @@ module module_skeleton #(
         end
     end
 
-    // ---- 参数合法性检查（详细展开时机：elaboration，综合器会忽略 initial） ----
+    // ---- 参数合法性检查（仿真 time 0；综合通过 translate_off 排除） ----
     // 注意：$error/$fatal/assert 属于 SystemVerilog。纯 Verilog-2001 用
-    // $display + $finish，可移植性最好。
+    // $display + $stop；Icarus 用 vvp -N 才会非零退出。
     // synthesis translate_off
     initial begin
         if (DATA_W <= 0) begin
             $display("ERROR: %m: DATA_W must be positive, got %0d", DATA_W);
-            $finish;
+            $stop;
         end
     end
     // synthesis translate_on

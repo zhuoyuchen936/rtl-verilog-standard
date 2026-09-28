@@ -52,15 +52,12 @@ if (errors == 0) begin
     $finish;
 end else begin
     $display("=== TEST FAILED ===");
-`ifdef VERILATOR
-    $fatal(1, "self-check reported %0d failure(s)", errors);
-`else
-    $finish;
-`endif
+    // Icarus 运行器必须带 vvp -N；SV 工程可改用 $fatal(1, ...)。
+    $stop;
 end
 ```
 
-### R-10-01b ⚠️ 不要依赖仿真器的退出码 `[通用]` `[工具]` 实测
+### R-10-01b 正确传播仿真失败 `[通用]` `[工具]` 实测
 
 **`$finish(1)` 的参数不是退出码**，它是"打印多少统计信息"（0/1/2）。实测结果：
 
@@ -72,23 +69,25 @@ end
 也就是说，一个打印了 `=== TEST FAILED ===` 的仿真，用 `$finish(1)` 结束时**退出码仍然是 0**，
 CI 会把它判成通过——这是一条会让整条回归形同虚设的坑。
 
-**唯一可移植的判据是 grep 日志**：
+退出码是主判据，PASS 标记可作附加检查。纯 V2001 用 `$stop` 配 `vvp -N`；SV 用 `$fatal`。下面示例同时保留进程失败和缺少 PASS 的失败：
 
 ```bash
 # Linux / macOS
-./sim | tee sim.log
+set -o pipefail
+./sim | tee sim.log || exit 1
 grep -q "=== TEST PASSED ===" sim.log || { echo "REGRESSION FAILED"; exit 1; }
 ```
 
 ```powershell
 # Windows PowerShell
 .\sim.exe | Tee-Object sim.log
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 if (-not (Select-String -Path sim.log -Pattern '=== TEST PASSED ===' -Quiet)) {
     Write-Error "REGRESSION FAILED"; exit 1
 }
 ```
 
-所以本模板同时做两件事：打印固定的判据串（给 grep），并在支持的仿真器上用 `$fatal` 真正异常退出。
+本模板打印固定判据串，失败和超时都用 `$stop`；Icarus 用 `vvp -N`，Verilator 默认将 `$stop` 作为失败。运行器必须实测负向用例。
 
 注意两点：
 - 用 **`!==`** 而不是 `!=`。`!=` 遇到 x/z 会返回 x（被当成假），于是"信号是 X"这种错误会被漏掉。
@@ -122,7 +121,7 @@ initial begin
     #TIMEOUT_NS;
     $display("[%0t] FATAL: simulation timeout", $time);
     $display("=== TEST FAILED (timeout) ===");
-    $finish(1);
+    $stop;  // Icarus: vvp -N
 end
 ```
 
@@ -235,7 +234,7 @@ end
 
 ```bash
 # Icarus Verilog
-iverilog -g2012 -o sim tb_fsm_3seg.v fsm_3seg.v && vvp sim
+iverilog -g2001 -s tb_fsm_3seg -o sim tb_fsm_3seg.v fsm_3seg.v && vvp -N sim
 
 # Verilator（需要 --timing 支持 # 延迟）
 verilator --binary --timing -Wall --top-module tb_fsm_3seg tb_fsm_3seg.v fsm_3seg.v
@@ -248,7 +247,7 @@ verilator --binary --timing -Wall --top-module tb_fsm_3seg tb_fsm_3seg.v fsm_3se
 
 ## 本篇检查清单
 
-- [ ] 仿真结束打印 PASS/FAIL，失败时 `$finish(1)` 返回非零码
+- [ ] 仿真结束打印 PASS/FAIL，失败与超时时 `$stop` + `vvp -N`（或 SV `$fatal`）返回非零码
 - [ ] 比较用 `!==` 而不是 `!=`（能抓到 X）
 - [ ] 第一个错误不中断仿真，跑完统计总数
 - [ ] 有超时看门狗

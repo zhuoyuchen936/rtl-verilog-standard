@@ -34,6 +34,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from collections import Counter
 
 IS_WINDOWS = os.name == "nt"
@@ -137,10 +138,10 @@ VERILATOR_MSG = re.compile(r"^%(Error|Warning)(?:-([A-Z0-9_]+))?:", re.M)
 # what to actually change.
 HINTS = {
     "WIDTH": "位宽不匹配：显式写出位宽或用 {N{1'b0}} 扩展，别指望隐式截断",
-    "WIDTHEXPAND": "右值比左值窄，会被零扩展——确认这是你要的，否则显式扩展",
+    "WIDTHEXPAND": "右值比左值窄；按表达式的 signedness 做零/符号扩展，确认扩展符合意图",
     "WIDTHTRUNC": "右值比左值宽，高位会被丢弃——这是最常见的静默 bug",
     "LATCH": "推断出了锁存器：组合 always 块里有路径没赋值，补 default 或先赋默认值",
-    "CASEINCOMPLETE": "case 没有覆盖所有取值且无 default：会推断锁存器",
+    "CASEINCOMPLETE": "case 未覆盖所有取值；检查默认赋值与保持意图，不一定会推断锁存器",
     "CASEX": "casex/casez 会把 x/z 当通配，综合前仿真易掩盖 bug，改用 case 或 casez+明确编码",
     "COMBDLY": "组合块里用了非阻塞赋值 <=：组合逻辑应当用阻塞赋值 =",
     "BLKSEQ": "时序块里用了阻塞赋值 =：时序逻辑应当用非阻塞赋值 <=",
@@ -196,17 +197,33 @@ def summarize_verilator(out: str):
 # Yosys structural check
 # --------------------------------------------------------------------------
 
-def run_yosys(runner: Runner, files, top, sv):
-    read = "read_verilog" + (" -sv" if sv else "")
-    cmds = [f"{read} {' '.join(runner.path(f) for f in files)}"]
-    cmds.append(f"hierarchy -check" + (f" -top {top}" if top else " -auto-top"))
-    # proc turns always-blocks into registers/muxes; latches only become visible
-    # after this point, which is why a pure linter can miss them.
-    cmds += ["proc", "opt -purge", "check -assert", "stat"]
-    return runner.run(["-p", "; ".join(cmds)])
+def tcl_quote(value: str) -> str:
+    """Quote a Tcl word without variable, command or backslash substitution."""
+    if any(c in value for c in '\r\n\x00'):
+        raise ValueError("Yosys arguments cannot contain newlines or NUL")
+    return '"' + ''.join('\\' + c if c in '\\"$[]' else c for c in value) + '"'
 
 
-LATCH_RE = re.compile(r"\$_?DLATCH|\\\$dlatch|found and reported (\d+) problems", re.I)
+def run_yosys(runner: Runner, files, top, sv, incdirs=(), defines=()):
+    # The .ys command parser preserves quotes in -I/-D values. Use the Tcl
+    # bridge's argument-vector form so spaces/macros arrive unchanged.
+    read_args = ["read_verilog"] + (["-sv"] if sv else [])
+    for directory in incdirs:
+        read_args += ["-I", runner.path(os.path.abspath(directory))]
+    for define in defines:
+        read_args += ["-D", define]
+    read_args += [runner.path(os.path.abspath(f)) for f in files]
+    cmds = ["yosys " + " ".join(tcl_quote(arg) for arg in read_args)]
+    cmds.append("yosys hierarchy -check" + (" -top " + tcl_quote(top) if top else " -auto-top"))
+    # Assert on actual cell types before optimization can discard a latch.
+    cmds += ["yosys proc",
+             'yosys select -assert-none {t:$dlatch} {t:$adlatch} {t:$dlatchsr}',
+             "yosys opt -purge", "yosys check -assert", "yosys stat"]
+    with tempfile.TemporaryDirectory(prefix="rtl-yosys-") as tmp:
+        script = os.path.join(tmp, "check.tcl")
+        with open(script, "w", encoding="utf-8") as stream:
+            stream.write("\n".join(cmds) + "\n")
+        return runner.run(["-c", runner.path(script)])
 
 
 def main() -> int:
@@ -214,8 +231,9 @@ def main() -> int:
         description="Lint and synthesis-smoke-test Verilog/SystemVerilog.")
     ap.add_argument("files", nargs="+", help="RTL source files")
     ap.add_argument("--top", help="top module name")
-    ap.add_argument("--sv", action="store_true", help="treat sources as SystemVerilog")
-    ap.add_argument("--v2001", action="store_true",
+    language = ap.add_mutually_exclusive_group()
+    language.add_argument("--sv", action="store_true", help="treat sources as SystemVerilog")
+    language.add_argument("--v2001", action="store_true",
                     help="enforce the Verilog-2001 baseline (--language 1364-2001). "
                          "Without this, verilator parses as SystemVerilog and SV syntax "
                          "in a .v file lints clean.")
@@ -231,7 +249,13 @@ def main() -> int:
                          "(use = form; a bare flag would be parsed as this script's own option)")
     args = ap.parse_args()
 
-    missing = [f for f in args.files if not os.path.exists(f)]
+    if args.top and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", args.top):
+        ap.error("--top must be a simple Verilog module identifier")
+    if any(any(c in s for c in '\r\n\x00') for s in
+           args.files + args.waiver + args.inc + args.define):
+        ap.error("paths and defines cannot contain newlines or NUL")
+    missing = [f for f in args.files + args.waiver if not os.path.isfile(f)]
+    missing += [d for d in args.inc if not os.path.isdir(d)]
     if missing:
         print("找不到这些文件: " + ", ".join(missing), file=sys.stderr)
         return 2
@@ -264,10 +288,12 @@ def main() -> int:
         for code, n in codes.most_common():
             hint = HINTS.get(code, "")
             print(f"  {code:<18} x{n:<4} {hint}")
-    if errors == 0 and warnings == 0:
+    if r.returncode == 0 and errors == 0 and warnings == 0:
         print("  lint 干净 ✔")
+    if r.returncode != 0:
+        print(f"  Verilator 返回码: {r.returncode}")
 
-    if errors or (args.strict and warnings):
+    if r.returncode != 0 or errors or (args.strict and warnings):
         rc_total = 1
 
     synth_ran = False
@@ -288,7 +314,7 @@ def main() -> int:
             rc_total = 1
         else:
             synth_ran = True
-            ry = run_yosys(ys, args.files, args.top, args.sv)
+            ry = run_yosys(ys, args.files, args.top, args.sv, args.inc, args.define)
             yout = (ry.stdout or "") + (ry.stderr or "")
             print("=" * 72)
             print(f"[yosys hierarchy/proc/check]  返回码 {ry.returncode}")
@@ -306,9 +332,6 @@ def main() -> int:
             print("\n".join(keep[-80:]) if keep else yout[-2000:])
             if ry.returncode != 0:
                 rc_total = 1
-            if re.search(r"\$_?DLATCH|\bDLATCH\b", yout, re.I):
-                print("\n⚠️  yosys 推断出了锁存器(DLATCH)——组合逻辑有路径没赋值。")
-                rc_total = 1
 
     print()
     print("=" * 72)
@@ -317,7 +340,7 @@ def main() -> int:
     scope = "verilator lint" + (" + yosys 结构检查" if synth_ran else " （未跑结构检查）")
     print("检查范围: " + scope)
     if not args.synth:
-        print("提示: 没有加 --synth，**只跑了一半**。真 latch / 多驱动 / 组合环需要 yosys 才能查出来。")
+        print("提示: 没有加 --synth；本次结果只覆盖 Verilator lint。")
     print("结论: " + ("通过 ✔" if rc_total == 0 else "有问题，见上面的输出 ✘"))
     return rc_total
 

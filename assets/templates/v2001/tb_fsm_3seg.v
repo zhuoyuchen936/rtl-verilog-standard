@@ -13,7 +13,7 @@
 //   5. 激励在时钟**下降沿**驱动、在上升沿之后采样，天然避开与 DUT 的竞争。
 //
 // 运行：
-//   $ iverilog -g2012 -o sim tb_fsm_3seg.v fsm_3seg.v && vvp sim
+//   $ iverilog -g2001 -s tb_fsm_3seg -o sim tb_fsm_3seg.v fsm_3seg.v && vvp -N sim
 //   $ verilator --binary --timing --top-module tb_fsm_3seg tb_fsm_3seg.v fsm_3seg.v
 //
 // 注意：Verilator 会把「紧跟注释符的 verilator 一词」当成编译指示(metacomment)。
@@ -28,7 +28,7 @@ module tb_fsm_3seg;
     localparam integer TIMEOUT_NS = 10_000;
 
     // ---- DUT 接口 -----------------------------------------------------------
-    reg  clk   = 1'b0;
+    reg  clk;
     reg  rst_n = 1'b0;
     reg  start = 1'b0;
     reg  done  = 1'b0;
@@ -53,13 +53,16 @@ module tb_fsm_3seg;
     // 豁免必须是"最小范围 + 写明理由"，而不是在命令行上全局 -Wno-BLKSEQ。
     // （另注：注释的第一个词若是 verilator，会被当成编译指示，所以上一行加了"注："）
     /* verilator lint_off BLKSEQ */
+    initial clk = 1'b0;
     always #(CLK_PERIOD/2) clk = ~clk;
     /* verilator lint_on BLKSEQ */
 
     // ---- 波形 ---------------------------------------------------------------
     initial begin
-        $dumpfile("tb_fsm_3seg.vcd");
-        $dumpvars(0, tb_fsm_3seg);
+        if ($test$plusargs("trace")) begin
+            $dumpfile("tb_fsm_3seg.vcd");
+            $dumpvars(0, tb_fsm_3seg);
+        end
     end
 
     // ---- 看门狗：挂死也要有结论 ---------------------------------------------
@@ -67,7 +70,7 @@ module tb_fsm_3seg;
         #TIMEOUT_NS;
         $display("[%0t] FATAL: simulation timeout after %0d ns", $time, TIMEOUT_NS);
         $display("=== TEST FAILED (timeout) ===");
-        $finish(1);
+        $stop;
     end
 
     // ---- 检查工具 -----------------------------------------------------------
@@ -144,17 +147,9 @@ module tb_fsm_3seg;
             $finish;
         end else begin
             $display("=== TEST FAILED ===");
-            // ⚠️ 实测过的坑：$finish 的参数是"打印多少统计信息"，不是退出码。
-            // 注：两种仿真器跑完都返回 exit code 0，CI 会把失败的用例判成通过。
-            // 所以失败路径必须做两件事：
-            //   1. 打印固定的 "=== TEST FAILED ===" 供脚本 grep（唯一可移植的判据）；
-            //   2. 在支持的仿真器上用 $fatal 真正异常退出。
-            // （本行注释刻意不以工具名开头——首词是那个名字会被当成编译指示。）
-            `ifdef VERILATOR
-                $fatal(1, "self-check reported %0d failure(s)", errors);
-            `else
-                $finish;
-            `endif
+            // 纯 Verilog-2001：Icarus 必须用 vvp -N；默认 Verilator 也将
+            // $stop 视为失败。$finish 的参数只控制诊断输出，不是退出码。
+            $stop;
         end
     end
 
