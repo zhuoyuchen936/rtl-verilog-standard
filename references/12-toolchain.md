@@ -27,7 +27,7 @@
 | 引擎 | 实际执行的命令 | 查什么 | 为什么不能省 |
 |---|---|---|---|
 | Verilator | `--lint-only -Wall [+ -sv/--top-module/-I/+define+/waiver]` | 语法、位宽、敏感表、latch、未驱动/未使用、case 覆盖、文件名≠模块名 | 源码级、秒回、覆盖面最广 |
-| Yosys | `read_verilog → hierarchy -check → proc → select -assert-none（latch 单元）→ opt -purge → check -assert → stat` | **真正被推断出来的** latch（`$dlatch`）、多驱动网、组合环，以及单元数量 | `always` 块只有在 `proc` 之后才展开成寄存器和 MUX，**latch 到这一步才现形**；纯 linter 会漏 |
+| Yosys | `read_verilog → hierarchy -check → proc → select -assert-none（latch 单元）→ check -assert → opt -purge → check -assert → stat` | **真正被推断出来的** latch（`$dlatch`）、多驱动网、组合环，以及单元数量 | `always` 块只有在 `proc` 之后才展开成寄存器和 MUX，**latch 到这一步才现形**；纯 linter 会漏 |
 
 `--synth` 才启用 Yosys 那一半。未加该选项时只报告 lint；若目标设计不兼容 Yosys，改用项目综合流程并说明覆盖范围。
 
@@ -81,14 +81,13 @@ No latch inferred for signal `\fsm_3seg.\next_state' ...
 | 第一行就 `UnicodeEncodeError: 'charmap' codec can't encode` | 脚本打印中文，Windows Python 默认按控制台代码页（cp1252/cp936）编码 stdout | 脚本已内建 UTF-8 重配置；旧版或外部工具可设 `PYTHONIOENCODING=utf-8` |
 | `找不到 verilator` | WSL 里没装 | `wsl -- sudo apt install verilator yosys` |
 | 宏/include 配置 | `--inc` 和 `--define` 现已传给两个引擎 | Yosys 使用 Tcl 参数列表保留空格；需带 Tcl 支持的 Yosys 构建 |
-| 想用 `.f` filelist | 脚本只接受**文件列表**，不认 `-f` | 自己展开，见下方 PowerShell 片段 |
+| 已有项目 filelist | 简单清单用 `--filelist` | 保留顺序、宏和 include，支持语法见 §8.2 |
 | 想加 verilator 原生 flag | 用 `--verilator-arg=` **等号形式** | `--verilator-arg=--timing`；写成空格形式会被脚本自己的 argparse 吃掉 |
 
-以下仅适用于**纯源文件清单**，路径需已相对当前目录。含 `+incdir+`、`+define+`、嵌套清单或空格路径时使用项目构建入口；不得静默丢弃这些选项。PowerShell 示例：
+从项目根目录调用，清单内路径也以项目根目录为基准。
 
 ```powershell
-$srcs = Get-Content rtl\rtl.f | Where-Object { $_.Trim() -ne '' -and $_ -notmatch '^\s*(//|#|\+)' }
-python scripts\rtl_lint.py --top soc_top --synth $srcs
+python scripts\rtl_lint.py --sv --top soc_top --synth --filelist rtl/rtl.f
 ```
 
 #### 0.3.2 macOS
@@ -104,14 +103,9 @@ python scripts\rtl_lint.py --top soc_top --synth $srcs
 | 找不到 Verible | **Homebrew 没有 verible formula** | 从 <https://github.com/chipsalliance/verible/releases> 下 macOS 二进制手动放进 PATH |
 | Vivado / Quartus 装不上 | **这两家根本不出 macOS 版**——不是 Apple Silicon 的问题，Intel Mac 同样没有 | 只能走 Linux 虚拟机（UTM/Parallels）、远程 Linux 服务器，或另一台 PC。**§3、§4 两章在 Mac 本机不可执行** |
 
-把 `.f` 展开成文件列表（zsh / bash，与上面 PowerShell 片段等价）：
-
 ```bash
-srcs=$(grep -vE '^\s*(//|#|\+)' rtl/rtl.f | grep -vE '^\s*$')
-python3 scripts/rtl_lint.py --top soc_top --synth ${=srcs}
+python3 scripts/rtl_lint.py --sv --top soc_top --synth --filelist rtl/rtl.f
 ```
-
-（`${=srcs}` 是 zsh 的按词拆分语法；bash 里直接写 `$srcs` 即可。）
 
 ### 0.4 退出码语义 `[工具]` `[通用]`
 
@@ -448,7 +442,9 @@ report_timing_summary   -file $repDir/post_place_timing_summary.rpt
 # STEP 4: 布线 + 报告
 route_design
 write_checkpoint -force $outputDir/post_route.dcp
-report_timing_summary -file $repDir/post_route_timing_summary.rpt
+report_timing_summary -delay_type min_max -report_unconstrained -check_timing_verbose \
+                      -file $repDir/post_route_timing_summary.rpt
+report_route_status   -file $repDir/post_route_status.rpt
 report_utilization    -file $repDir/post_route_util.rpt
 report_drc            -file $repDir/post_route_drc.rpt
 
@@ -493,15 +489,28 @@ vivado -mode batch -source syn/build.tcl -log build/vivado.log -journal build/vi
 ⚠️ **`-assert` 的常见误读** `[业界]` W06/§3.10：中文资料常把它说成"开启 SystemVerilog 断言综合"，这是错的。SV 的 `assert property` 在 Vivado 综合中的处理与此 flag 无关。**SV 断言请用 `` `ifndef SYNTHESIS `` 包住**，靠仿真/形式验证保证。
 注：`-flatten_hierarchy` 的取值 `rebuilt`（GUI 默认）W06 标注**未从官方页面逐字确认**（只确认了 `full`/`none`）。若报错就改 `none`。
 
-### 3.4 报告：每一步都出，最低要求两份 `[业界]` W06/S15、S20 `[FPGA]`
+### 3.4 从失败路径选择 RTL 修改
 
-综合后 / 布局后 / 布线后各一份 `report_timing_summary` + `report_utilization`，落到 `build/reports/` 并由 CI 归档。UG906 原话："Review this report or the messages tab for Errors, Critical Warnings and Warnings"，且"The Synthesis tool can issue Critical Warnings and Warnings that become more serious later in the flow."
+先记录目标器件或工艺库、时钟关系、约束版本及报告阶段。检查时钟是否覆盖所有预期寄存器、生成时钟与 I/O 延迟是否完整、例外是否命中预期端点。Vivado 可用 `check_timing`、`report_clocks`、`report_clock_interaction` 与 `report_exceptions -ignored`。同步 multicycle 例外要用实际 launch/capture 使能证明间隔，并检查对应 hold 边沿。异步 MCP/Gray 路径的预算见[跨域约束](06-clock-reset-cdc.md)。
+
+按时钟组查看 setup 的 WNS/TNS/失败端点数及 hold 的 WHS/THS/失败端点数。选有代表性的路径，记下起终点、数据或控制引脚、逻辑级数、单元与布线延迟、扇出、时钟偏斜。Vivado 用 `report_timing -delay_type max` 或 `min` 查看详细路径，可用 `-from` 和 `-to` 重查同一范围。
+
+| 路径证据 | 候选改动 | 改动后的验证 |
+|---|---|---|
+| 乘加、归约或宽选择器的单元延迟占主导 | 在树的分组、DSP 内部寄存器或 MUX 边界插拍，核对迭代反馈距离 | 对齐 valid、标签、掩码和舍入点，测 L、实际 II、满流水停顿与排空。 |
+| 下游 ready 长距离回传 | 在边界放弹性缓冲，按回压延迟预留槽位 | 检查背压时稳定、已接收数据守恒、顺序、连续吞吐与复位冲刷。 |
+| CE、复位、选路的高扇出或布线占主导 | 查看扇出分布、拥塞与物理位置，比较局部译码、等价复制或分组控制 | 核对所有消费者在同一事务上生效，保留完成/退出条件。比较总资源、同端点与全局裕量。 |
+| 最小延迟或时钟偏斜导致 hold 失败 | 先确认捕获边沿、约束和时钟树，再用目标实现流程修复短路径 | 布线后复查 min 与 max。ASIC 在相关模式、PVT/RC 角及 CTS 后的传播时钟下核验。 |
+
+FPGA 的 OOC、未布局整板综合、布局后和布线后分别记录。时序签核采用目标约束下的布线后报告，连同未约束路径、路由状态与 DRC 一起核对。ASIC 按项目实际 MMMC 场景与提取寄生参数分析。仿真的工作量用周期表示，板上端到端时间由板测给出。
+
+例如一版 100 MHz NPU 把 8 路结果返回扩到 16 路，继续复用 32 路指数乘法。相同负载下，90 个服务的仿真周期和减少 972,486 拍（0.950%）。未布局整板综合增加 2,044 LUT、0.5 个 BRAM tile，DSP 保持 790。最差 setup 落在指针寄存器的 CE，下一次定位从该控制路径入手。工程记录位于该 NPU 仓库 `da2_demo/rtl_npu/experiments/la_return16_20261118/RESULTS.md` 和同目录 `BOARD_SYNTH.md`。
 
 ### 3.5 CDC 必须跑 `report_cdc`，且它**不给时序数字** `[业界]` W06/S19 UG949 `[FPGA]`
 
 - 它做的是"**structural analysis** of the clock domain crossings"，用于找出可能导致 metastability 或数据不一致的不安全跨域结构。
 - **关键限制（官方原文）**："Report CDC does not provide timing information because timing slack does not make sense on paths that cross asynchronous clock domains."
-- → **推论（本节重点）**：CDC 问题**永远不会**体现在 timing slack 上。**时序报告全绿 ≠ 跨时钟域安全。** 这正是铁律 E6 必须靠结构（同步器/异步 FIFO/握手）而不是靠约束去保证的原因。
+- CDC 报告核对跨域结构。另查 Gray/bundled-data 的有界时延、同步链级间 STA 和复位释放。约束覆盖与协议行为都能影响可靠性。
 - 每条 Critical 都要有结论：要么改成标准两级同步器 / 异步 FIFO（`assets/templates/v2001/sync_2ff.v`、`async_fifo.v`），要么写 waiver 说明为什么安全。
 - `[ASIC]` 对应工具是 SpyGlass CDC / Questa CDC / Conformal CDC，机理相同。
 - 注：CDC 规则 ID（CDC-1 / CDC-4 …）W06 标注**未从官方页面取到列表**，不要照抄具体 ID。
@@ -586,6 +595,8 @@ set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to clk
 read_verilog -sv -I rtl/include rtl/pkg/soc_pkg.sv rtl/fifo_sync.sv rtl/soc_top.sv
 hierarchy -check -top soc_top
 proc
+select -assert-none t:$dlatch t:$adlatch t:$dlatchsr
+check -assert
 opt -purge
 check -assert
 stat
@@ -594,7 +605,7 @@ write_verilog -noattr build/syn/soc_top_gate.v
 
 - **`hierarchy` 必须是加载设计后的第一条命令**（官方原话："`hierarchy` should always be the first command after loading a design"）——用于解析层次与参数化实例；`-defer` 是可选参数，不是默认值。
 - `read_verilog` **自动定义宏 `SYNTHESIS`**（`-formal` 时改为 `FORMAL`），并且**永远定义 `YOSYS`**。这与 Vivado/DC 的习惯一致，所以 `` `ifndef SYNTHESIS `` 包住的仿真代码在 Yosys 下同样被排除。
-- `proc` 把 `always` 展开成寄存器/MUX；**latch 只有在这一步之后才现形**——这是 `rtl_lint.py --synth` 存在的全部理由。
+- `proc` 展开寄存器和 MUX 后即检查 latch、驱动冲突和环路。常量折叠可能消掉其中一个冲突驱动，优化后再复查剩余结构。
 - `stat` 给单元统计：`$adff`/`$dff` 是向量单元，需结合 WIDTH 参数核对寄存器位数；出现 `$dlatch` 就是组合块漏赋值；出现意外的 `$mem` 说明被推断成了存储器。
 
 `[工具]` 实测（Yosys 0.33，`assets/templates/v2001/fsm_3seg.v`）：`proc` 阶段打印 `No latch inferred for signal '\next_state'`，`stat` 给出 `$adff 3 / $eq 3 / $mux 2 / $pmux 1`——三段式 FSM 的状态寄存器 + 输出寄存器，与手算一致。**这一行 `No latch inferred` 就是三段式写法值不值的直接证据。**
@@ -741,64 +752,33 @@ Makefile 方式的关键变量：`SIM` / `TOPLEVEL_LANG` / `VERILOG_SOURCES` / `
 
 `.gitignore` 至少包含：`build/ obj_dir/ sim_build/ *.vvp *.vcd *.fst *.jou *.log .Xil/ *.xpr *.runs/ *.cache/ db/ incremental_db/ output_files/ qdb/ __pycache__/ results.xml`。
 
-### 8.2 filelist (`.f`) 约定 `[业界]` W06/S1、S12、S17、S28 `[通用]`
+### 8.2 共享源清单
 
-```
-// rtl/rtl.f -- 只放可综合源。工具特有 flag 一律放命令行。
-// Verilator: verilator ... -F rtl/rtl.f      iverilog: iverilog -g2012 ... -c rtl/rtl.f
-// xvlog:     xvlog -sv -f rtl/rtl.f          svlint:   svlint -f rtl/rtl.f
-+incdir+include
-+define+SYNTHESIS
+从项目根目录运行 `rtl_lint.py --filelist rtl/rtl.f` 或模板的 `make sim`。两者共用清单解析器。Makefile 用 `--emit-iverilog-filelist rtl/rtl.f` 输出 Icarus 的临时 `-c` 清单。清单内相对路径均以调用目录为基准，对应 Verilator 的 `-f` 语义。每行写一项，先列全局选项，再按编译顺序列源文件。
 
-pkg/soc_pkg.v
-fifo_sync.v
-soc_top.v
-```
-
-- **只写三样东西**：源文件路径（每行一个）、`+incdir+`、`+define+`。这是 Verilator / iverilog / xvlog / svlint 四家的最大公约数。
-- **`-f` vs `-F`（Verilator）**：`-f` 里的相对路径相对**当前工作目录**；`-F` 相对**该 `.f` 文件所在目录**。**推荐 `-F`**——脚本从任意目录调用都不会断。
-- **Verible 与 Yosys 不吃 `-f`**：Verible 直接接文件列表，Yosys 用 `.ys` 脚本，需要 Makefile/脚本把 `.f` 展开（见 §0.3 的 PowerShell 片段）。
-
-### 8.3 Makefile 模板 `[业界]` W06/§2.4 `[通用]`
-
-五个入口固定为 `lint / sim / wave / syn / clean`，`lint` 与 `sim` 失败时必须返回非零。
-
-```makefile
-TOP     ?= soc_top
-TB_TOP  ?= tb_soc_top
-RTL_F   ?= rtl/rtl.f
-TB_SRCS ?= $(wildcard tb/*.v)
-BUILD   ?= build
-WAIVER  ?= lint/waivers.vlt
-
-.PHONY: lint sim wave syn smoke clean
-# 1) 本规范的硬门禁：一条命令，两个引擎
-lint:
-	python3 scripts/rtl_lint.py --top $(TOP) --synth --strict \
-	    --waiver $(WAIVER) $(shell grep -v '^\s*\(//\|+\|$$\)' $(RTL_F) | sed 's|^|rtl/|')
-
-# 2) 功能仿真（Icarus，四态）
-$(BUILD)/sim.vvp: $(TB_SRCS)
-	@mkdir -p $(BUILD)
-	iverilog -g2012 -Wall -Winfloop -s $(TB_TOP) -o $@ -c $(RTL_F) $(TB_SRCS)
-# 波形器：Linux/WSL 上一般是 gtkwave；macOS 上 gtkwave 装不了（见 §0.3.2），用 surfer
-WAVE ?= $(shell command -v gtkwave 2>/dev/null || command -v surfer 2>/dev/null || echo surfer)
-sim: $(BUILD)/sim.vvp
-	vvp -N $< -fst                 # -N：$stop 时返回 1，CI 才能失败；-fst 必须在 $< 之后
-wave: $(BUILD)/sim.vvp
-	vvp -N $< -fst +trace && $(WAVE) $(BUILD)/wave.fst &
-
-# 3) 可综合性冒烟
-smoke:
-	yosys -s syn/smoke.ys -l $(BUILD)/yosys.log
-# 4) 实现
-syn:
-	vivado -mode batch -source syn/build.tcl -log $(BUILD)/vivado.log -journal $(BUILD)/vivado.jou
-clean:
-	rm -rf $(BUILD) obj_dir
+```text
+// rtl/rtl.f
++incdir+rtl/include
++define+DATA_W=32
+rtl/pkg/soc_pkg.sv
+rtl/fifo_sync.sv
+rtl/soc_top.sv
 ```
 
-Windows 上没有 make 时用 `scripts/build.ps1 -Stage lint|sim|wave|syn`，结尾务必：
+简单清单支持空行、整行 `//` 或 `#` 注释、每行一个 `+incdir+DIR` 或 `+define+NAME[=VALUE]`，以及逐行源文件。无值宏 `+define+NAME` 统一展开为 `NAME=1`。解析器接受 UTF-8 BOM、CRLF 和无末尾换行的清单。目录或宏有多项时分行写。各项使用无空白的字面路径或值。含空格的路径可通过脚本原有的显式文件和 `--inc` 参数传入。嵌套清单、库搜索、按文件切换宏、引号转义、环境展开等使用项目已有构建入口。
+
+### 8.3 Makefile 模板
+
+复制[可运行的 Makefile](../assets/templates/Makefile)到项目根目录。按工程设置 `RTL_F`、`TOP`、`TB_SRCS` 和 `TB_TOP`。`RTL_LINT` 可指向本 skill 脚本的绝对路径。`RTL_LANG=v2001` 或 `sv` 同时选择 lint 和 Icarus 的语言模式。已有 `lint/waivers.vlt` 时自动传入，也可显式指定 `WAIVER`。
+
+```bash
+make lint RTL_LANG=v2001 TOP=soc_top
+make sim RTL_LANG=v2001 TB_TOP=tb_soc_top
+```
+
+独立小例每次 `make sim` 或 `make wave` 都重新编译，RTL、头文件、宏或参数的变更在本次调用生效。大型工程可沿用已有的增量入口，缓存键需覆盖这些输入、文件顺序和工具配置。`wave` 使用 TB 的 `+trace` 开关、`WAVEFILE` 输出路径和 `WAVE` 查看器。`smoke` 和 `syn` 调用工程自己的 Yosys/Vivado 脚本。
+
+若 Windows 工程自带 PowerShell 构建入口，在脚本中检查外部命令的退出状态。例：
 
 ```powershell
 if ($LASTEXITCODE -ne 0) { throw "Stage '$Stage' failed with exit code $LASTEXITCODE" }
@@ -877,7 +857,7 @@ CI：
 ## 维护状态与边界
 
 2026-09-28：已修复 Verilator 退出码、Yosys include/define 透传、路径转义和 latch 判据。
-脚本仍不直接解析 filelist，Yosys 内置前端仍只支持部分 SV，Tcl 功能需可用。
+简单清单由 `--filelist` 读取。Yosys 使用启用 Tcl 的构建，内置前端支持部分 SV。
 Windows/WSL 路径逻辑沿用，本次未在 Windows 重跑；本机验证范围见 `assets/VERIFICATION.md`。
 Quartus 的历史二手引用仍需按所用版本核对。历史 Wxx 索引对应的 `_research` 不随本 skill 分发。
 

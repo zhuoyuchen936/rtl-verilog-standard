@@ -77,6 +77,60 @@ class RealToolTests(unittest.TestCase):
     def cli(self, *args):
         return run([sys.executable, SCRIPT, *args], ROOT)
 
+    def check_protocol(self, design, bench, cases, old, new):
+        """Run the shipped RTL, then a compilable single-fault copy against the same TB."""
+        iverilog, vvp = self.require('iverilog', 'vvp')
+        source = ROOT / 'assets/templates/v2001' / f'{design}.v'
+        tb = ROOT / 'tests/hdl' / f'tb_{bench}.sv'
+        with tempfile.TemporaryDirectory(prefix='rtl-protocol-') as tmp:
+            folder = Path(tmp)
+            content = source.read_text()
+            self.assertEqual(content.count(old), 1, f'fault site in {source.name}')
+            broken = folder / source.name
+            broken.write_text(content.replace(old, new))
+            for candidate, params in [(source, case) for case in cases] + [(broken, cases[0])]:
+                with self.subTest(design=design, params=params, injected=candidate == broken):
+                    overrides = [f'-Ptb_{bench}.{k}={v}' for k, v in params.items()]
+                    build = run([iverilog, '-g2012', '-s', f'tb_{bench}', *overrides,
+                                 '-o', 'sim', candidate, tb], folder)
+                    self.assertEqual(build.returncode, 0, build.stdout)
+                    sim = run([vvp, '-N', 'sim'], folder)
+                    if candidate == broken:
+                        self.assertNotEqual(sim.returncode, 0, sim.stdout)
+                        self.assertIn('FATAL:', sim.stdout)
+                        self.assertNotIn('timeout', sim.stdout.lower())
+                    else:
+                        self.assertEqual(sim.returncode, 0, sim.stdout)
+                        self.assertIn(f'PASS {bench} ', sim.stdout)
+
+    def test_single_stage_ready_valid(self):
+        self.check_protocol('module_skeleton', 'ready_valid', [{'CAPACITY': 1}],
+                            'else if (in_ready)', "else if (1'b1)")
+
+    def test_skid_buffer_ready_valid(self):
+        self.check_protocol('skid_buffer', 'ready_valid', [{'CAPACITY': 2}],
+                            'skid_data  <= s_data;', 'skid_data  <= ~s_data;')
+
+    def test_async_fifo_order_wrap_and_reset(self):
+        self.check_protocol('async_fifo', 'async_fifo', [
+            {'ASIZE': 2, 'W_HALF': 3, 'R_HALF': 7, 'PHASE': 1},
+            {'ASIZE': 3, 'W_HALF': 7, 'R_HALF': 3, 'PHASE': 3},
+            {'ASIZE': 2, 'W_HALF': 5, 'R_HALF': 5, 'PHASE': 1}],
+            '(rd_en & ~rd_empty)', 'rd_en')
+
+    def test_mcp_exactly_once(self):
+        self.check_protocol('handshake_mcp', 'handshake_mcp', [
+            {'S_HALF': 3, 'D_HALF': 7}, {'S_HALF': 7, 'D_HALF': 3}],
+            'dst_valid <= req_edge;', 'dst_valid <= req_edge | dst_valid;')
+
+    def test_open_loop_pulse_contract(self):
+        self.check_protocol('pulse_sync', 'pulse_sync', [{}],
+                            'sync2 ^ sync3', 'sync2 & ~sync3')
+
+    def test_ram_read_first_and_hold(self):
+        self.check_protocol('sdp_ram', 'sdp_ram', [{}],
+                            '<= mem[raddr];', '<= (we && waddr == raddr) ? wdata : mem[raddr];')
+
     def test_templates_lint_and_structure(self):
         self.require('verilator', 'yosys')
         sources = sorted((ROOT / 'assets/templates').rglob('*'))
@@ -120,6 +174,124 @@ endmodule
             synthesis = self.cli('--v2001', '--strict', '--synth', '--top', 'bad', source)
             self.assertNotEqual(synthesis.returncode, 0, synthesis.stdout)
             self.assertIn('Assertion failed', synthesis.stdout)
+
+    def test_conflicting_constant_driver_is_rejected_before_optimization(self):
+        self.require('verilator', 'yosys')
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / 'conflict.v'
+            source.write_text('''module conflict(input wire clk, input wire d, output reg q);
+always @(posedge clk) q <= d;
+always @(posedge clk) q <= 1'b0;
+endmodule
+''')
+            result = self.cli('--v2001', '--strict', '--synth', '--top', 'conflict', source)
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn('multiple conflicting drivers', result.stdout.lower())
+
+    def test_make_uses_current_rtl_header_and_filelist(self):
+        self.require('make', 'verilator', 'yosys', 'iverilog', 'vvp')
+        makefile = ROOT / 'assets/templates/Makefile'
+        with tempfile.TemporaryDirectory(prefix='rtl make ') as tmp:
+            folder = Path(tmp)
+            inc = folder / 'rtl/inc'
+            inc.mkdir(parents=True)
+            (folder / 'tb').mkdir()
+            header = inc / 'mask.vh'
+            source = folder / 'rtl/soc_top.v'
+            filelist = folder / 'rtl/rtl.f'
+            header.write_text("`define MASK 1'b0\n")
+            source.write_text('''`include "mask.vh"
+module soc_top(input wire d, output wire q);
+assign q = d ^ `MASK ^ `FEATURE;
+endmodule
+''')
+            filelist.write_text("+incdir+rtl/inc\n+define+FEATURE=1'b0\nrtl/soc_top.v\n")
+            (folder / 'tb/tb_soc_top.v').write_text('''module tb_soc_top;
+reg d;
+wire q;
+soc_top dut(.d(d), .q(q));
+initial begin
+    d = 1'b1;
+    #1;
+    if (q !== d) begin $display("wrong output"); $stop; end
+    $display("matched");
+    $finish;
+end
+endmodule
+''')
+            make = ['make', '-f', makefile, 'RTL_LANG=v2001', f'RTL_LINT={SCRIPT}',
+                    f'PYTHON={sys.executable}']
+            for target in ('lint', 'sim'):
+                result = run([*make, target], folder)
+                self.assertEqual(result.returncode, 0, result.stdout)
+            for path, old, new in ((source, 'q = d', 'q = ~d'), (header, "1'b0", "1'b1"),
+                                   (filelist, "1'b0", "1'b1")):
+                with self.subTest(changed=path.name):
+                    original = path.read_text()
+                    path.write_text(original.replace(old, new))
+                    result = run([*make, 'sim'], folder)
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                    self.assertIn('wrong output', result.stdout)
+                    path.write_text(original)
+                    restored = run([*make, 'sim'], folder)
+                    self.assertEqual(restored.returncode, 0, restored.stdout)
+                    self.assertIn('matched', restored.stdout)
+
+            # Bare macro used as a numeric one, Windows BOM/CRLF, no final newline.
+            source.write_text(source.read_text().replace('q = d', 'q = ~d'))
+            filelist.write_bytes(b'\xef\xbb\xbf+incdir+rtl/inc\r\n+define+FEATURE\r\nrtl/soc_top.v')
+            for target in ('lint', 'sim'):
+                result = run([*make, target], folder)
+                self.assertEqual(result.returncode, 0, result.stdout)
+            filelist.write_text('-f missing.f\n')
+            rejected = run([*make, 'sim'], folder)
+            self.assertNotEqual(rejected.returncode, 0, rejected.stdout)
+            self.assertIn('unsupported filelist entry', rejected.stdout)
+
+    def test_filelist_rejects_unhandled_options(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            filelist = Path(tmp) / 'rtl.f'
+            for entry in ('-f child.f', '+libext+.v', '+incdir+a+b', '+define+', '`define A'):
+                with self.subTest(entry=entry):
+                    filelist.write_text(f'{entry}\nexample.v\n')
+                    result = self.cli('--v2001', '--filelist', filelist)
+                    self.assertEqual(result.returncode, 2, result.stdout)
+                    self.assertIn(f'{filelist}:1:', result.stdout)
+
+    def test_documented_division_example_matches_integer_reference(self):
+        iverilog, vvp = self.require('iverilog', 'vvp')
+        reference = (ROOT / 'references/07-datapath-and-width.md').read_text()
+        section = reference.split('### R-07-08 ', 1)[1].split('\n### ', 1)[0]
+        snippet = section.split('```verilog\n', 1)[1].split('\n```', 1)[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            bench = folder / 'tb.v'
+            bench.write_text('module tb;\nreg signed [7:0] a;\nreg [7:0] u;\n' + snippet + '''
+integer n, unsigned_n, ref_q, ref_r;
+initial begin
+    for (n = -128; n <= 127; n = n + 1) begin
+        a = n[7:0];
+        u = n[7:0];
+        unsigned_n = (n < 0) ? n + 256 : n;
+        ref_q = (n < 0) ? -((-n) / 8) : n / 8;
+        ref_r = n - (ref_q * 8);
+        #1;
+        if (quotient !== ref_q || remainder !== ref_r ||
+            unsigned_q !== unsigned_n / 8 || unsigned_r !== unsigned_n % 8) begin
+            $display("mismatch for a=%0d", n);
+            $stop;
+        end
+    end
+    $display("256 inputs matched");
+    $finish;
+end
+endmodule
+''')
+            build = run([iverilog, '-g2001', '-s', 'tb', '-o', 'sim', bench], folder)
+            self.assertEqual(build.returncode, 0, build.stdout)
+            result = run([vvp, '-N', 'sim'], folder)
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertIn('256 inputs matched', result.stdout)
 
     def test_filename_dlatch_does_not_fake_a_latch(self):
         self.require('verilator', 'yosys')

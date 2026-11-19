@@ -13,7 +13,7 @@ Two independent checks, because they catch different things:
                           inferred latches, unused/undriven nets, case coverage
   yosys  proc; check      structural problems a linter cannot see: real latch
                           inference after proc, multi-driven nets, combinational
-                          loops, and a gate/cell count sanity number
+                          loops, and unmapped cell statistics
 
 Usage
 -----
@@ -21,9 +21,10 @@ Usage
   python rtl_lint.py --top counter --sv rtl/counter.sv
   python rtl_lint.py --top fifo --synth rtl/*.v      # add the yosys pass
   python rtl_lint.py --inc rtl/include --top top rtl/*.v
+  python rtl_lint.py --sv --top top --synth --filelist rtl/rtl.f
 
-Exit status is non-zero if any error (or, with --strict, any warning) is found,
-so it drops straight into a Makefile or CI step.
+A tool failure or failed structural check returns non-zero. With --strict,
+Verilator warnings also fail when the linter itself returns zero.
 """
 
 from __future__ import annotations
@@ -215,10 +216,10 @@ def run_yosys(runner: Runner, files, top, sv, incdirs=(), defines=()):
     read_args += [runner.path(os.path.abspath(f)) for f in files]
     cmds = ["yosys " + " ".join(tcl_quote(arg) for arg in read_args)]
     cmds.append("yosys hierarchy -check" + (" -top " + tcl_quote(top) if top else " -auto-top"))
-    # Assert on actual cell types before optimization can discard a latch.
+    # opt may resolve a conflicting driver to a constant and discard the cell.
     cmds += ["yosys proc",
              'yosys select -assert-none {t:$dlatch} {t:$adlatch} {t:$dlatchsr}',
-             "yosys opt -purge", "yosys check -assert", "yosys stat"]
+             "yosys check -assert", "yosys opt -purge", "yosys check -assert", "yosys stat"]
     with tempfile.TemporaryDirectory(prefix="rtl-yosys-") as tmp:
         script = os.path.join(tmp, "check.tcl")
         with open(script, "w", encoding="utf-8") as stream:
@@ -226,10 +227,64 @@ def run_yosys(runner: Runner, files, top, sv, incdirs=(), defines=()):
         return runner.run(["-c", runner.path(script)])
 
 
+def read_filelist(path):
+    """Read the ordered project manifest used by both lint and simulation."""
+    files, incdirs, defines = [], [], []
+    unsupported = ('"', '//', '/*', '*/', '$(', '${', '\x00')
+    with open(path, encoding="utf-8-sig") as stream:
+        for number, line in enumerate(stream, 1):
+            token = line.strip()
+            if not token or token.startswith(("//", "#")):
+                continue
+            problem = f"{path}:{number}: unsupported filelist entry {token!r}"
+            if any(c.isspace() for c in token) or any(x in token for x in unsupported):
+                raise ValueError(problem)
+            if token.startswith(("+incdir+", "+define+")):
+                if files:
+                    raise ValueError(f"{path}:{number}: place global options before sources")
+                option, value = token[1:].split("+", 1)
+                if not value or "+" in value:
+                    raise ValueError(problem)
+                if option == "incdir":
+                    incdirs.append(value)
+                elif re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*(=.*)?", value):
+                    # Native tools disagree on the value of a bare flag macro.
+                    defines.append(value if "=" in value else value + "=1")
+                else:
+                    raise ValueError(problem)
+            elif token.startswith(("-", "+", "@")):
+                raise ValueError(problem)
+            else:
+                files.append(token)
+    if not files:
+        raise ValueError(f"{path}: no RTL sources")
+    return files, incdirs, defines
+
+
 def main() -> int:
+    if sys.argv[1:2] == ["--emit-iverilog-filelist"]:
+        emitter = argparse.ArgumentParser(prog="rtl_lint.py --emit-iverilog-filelist",
+            description="Write a normalized Icarus -c list to stdout, relative to the working directory.")
+        emitter.add_argument("filelist")
+        request = emitter.parse_args(sys.argv[2:])
+        try:
+            files, incdirs, defines = read_filelist(request.filelist)
+        except (OSError, ValueError) as exc:
+            emitter.error(str(exc))
+        for directory in incdirs:
+            print("+incdir+" + directory)
+        for define in defines:
+            print("+define+" + define)
+        for source in files:
+            print(source)
+        return 0
+
     ap = argparse.ArgumentParser(
-        description="Lint and synthesis-smoke-test Verilog/SystemVerilog.")
-    ap.add_argument("files", nargs="+", help="RTL source files")
+        description="Lint and synthesis-smoke-test Verilog/SystemVerilog.",
+        epilog="Use --emit-iverilog-filelist FILE alone to emit the equivalent Icarus -c list.")
+    ap.add_argument("files", nargs="*", help="ordered RTL source files")
+    ap.add_argument("--filelist", help="simple -f list relative to the working directory "
+                    "(sources, +incdir+DIR, +define+NAME[=VALUE])")
     ap.add_argument("--top", help="top module name")
     language = ap.add_mutually_exclusive_group()
     language.add_argument("--sv", action="store_true", help="treat sources as SystemVerilog")
@@ -240,7 +295,7 @@ def main() -> int:
     ap.add_argument("--inc", action="append", default=[], help="include directory (repeatable)")
     ap.add_argument("--define", action="append", default=[], help="+define+NAME[=VAL] (repeatable)")
     ap.add_argument("--synth", action="store_true", help="also run the yosys structural check")
-    ap.add_argument("--strict", action="store_true", help="exit non-zero on warnings too")
+    ap.add_argument("--strict", action="store_true", help="also fail on Verilator warnings")
     ap.add_argument("--distro", help="WSL distro to use (Windows only; ignored on macOS/Linux)")
     ap.add_argument("--waiver", action="append", default=[],
                     help="verilator .vlt waiver file (repeatable); path is WSL-translated")
@@ -248,6 +303,18 @@ def main() -> int:
                     help="extra raw flag passed to verilator, e.g. --verilator-arg=--timing "
                          "(use = form; a bare flag would be parsed as this script's own option)")
     args = ap.parse_args()
+
+    if args.filelist:
+        if args.files:
+            ap.error("choose --filelist or positional RTL sources")
+        try:
+            args.files, incdirs, defines = read_filelist(args.filelist)
+        except (OSError, ValueError) as exc:
+            ap.error(str(exc))
+        args.inc.extend(incdirs)
+        args.define.extend(defines)
+    elif not args.files:
+        ap.error("specify RTL sources or --filelist")
 
     if args.top and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", args.top):
         ap.error("--top must be a simple Verilog module identifier")

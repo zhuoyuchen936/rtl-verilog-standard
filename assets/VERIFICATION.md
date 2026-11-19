@@ -1,38 +1,30 @@
 # 模板与检查脚本验证记录
 
-日期：2026-09-28。本记录由本次维护中的实际命令结果整理；可用下列命令复现。
-
-环境：macOS / Apple Silicon，Python 3.9.6，Verilator 5.050（2026-07-01），
-Yosys 0.68+post（c12172fbae8af5e20f6fb52e3d4e92d56ed587b6，启用 Tcl），Icarus Verilog 13.0。
+2026-11-19 在 macOS / Apple Silicon 上运行。Python 3.9.6、GNU Make 3.81、Icarus Verilog 13.0、Verilator 5.050、Yosys 0.68+post（c12172f，启用 Tcl）。
 
 ```bash
-python3 -m unittest discover -s tests -v
+python3 -B -m unittest discover -s tests -v
 ```
 
-结果：**11 个测试全部通过，0 skip**。全程生成文件位于临时目录。
+**21 个测试通过，0 个跳过。** 编译和故障注入均在临时目录进行。每个协议反例先成功编译，再由同一个计分板在仿真中报错并非零退出。
 
-| 检查 | 结果 |
+GPT‑6.2 Sol 在最终版本独立重跑全套测试，21/21 通过，0 失败、0 跳过，unittest 计时 12.557 秒。另在全新临时项目复制 Makefile，分别验证 BOM、无末尾换行、数值型无值宏及组合输入。宏改为 0 后仿真按预期失败，两端均拒绝不受支持的嵌套清单。技能格式校验、34 个本地链接（含 3 个锚点）和变更空白检查通过。
+
+| 实测入口 | 结果 |
 |---|---|
-| 9 个 V2001 RTL 模板，逐个 `--v2001 --strict --synth` | 全通过，lint 零警告，结构检查无 latch |
-| `fsm_3seg_sv.sv`，`--sv --strict --synth` | 通过 |
-| TB：Icarus `-g2001` + `vvp -N` | 正常完成 8/8 检查；强制失败、超时均非零退出 |
-| TB：Verilator `--binary --timing -Wall --language 1364-2001 --timescale 1ns/1ps` | 正常完成；强制失败、超时均非零退出 |
-| Verilator 无标准诊断的非零退出（mock） | 不再错误报告成功 |
-| 工具缺失与 warning/strict 组合（mock） | 按退出码与 strict 策略报告 |
-| include、宏、含空格/分号路径（真实工具） | 同一设计在两个引擎都通过 |
-| Verilator 局部豁免的真实 latch（负向用例） | Yosys 单元断言仍拒绝 |
-| 文件/模块名为 `dlatch` 的纯组合电路 | 不再被日志关键字误判 |
-| SV 源用 V2001 检查、互斥语言参数 | 正确失败 |
+| 9 个 V2001 RTL 和 1 个 SV RTL | 逐个显式指定语言、顶层、`--synth --strict`，全部通过。Verilator 零告警，Yosys 通过锁存器断言、优化前和优化后结构检查。 |
+| 同沿双驱动 | 两个过程分别写数据和常量的同一寄存器，被优化前 `check -assert` 拒绝。另验证 Verilator 局部豁免的真实 latch 仍被 Yosys 拒绝。 |
+| Makefile 与构建配置 | 使用清单宏和 include 成功 lint/仿真。分别只改 DUT、头文件、清单宏，普通 `make sim` 每次捕获错误，恢复后逐次通过。两端接受含 BOM/CRLF、无末尾换行和数值型无值宏的同一清单，均按行拒绝不支持的选项。 |
+| 文档内的除法与取模示例 | 直接编译参考页代码。8 位全部 256 个位型分别按 signed 和 unsigned 核对，商、余数均符合独立整数参考。 |
+| 单槽流水、双槽 skid buffer | 各枚举 4,096 个六拍发送/背压组合，并验证复位丢弃、无背压延迟一拍、II=1、载荷及边带稳定、按序排空。分别检出停顿覆盖和备用槽数据错误。 |
+| Gray 异步 FIFO | 深度 4 和 8，覆盖写快、读快、同频错相。检查满时继续写、空时继续读、绕回、并发读写、满 FIFO 协调复位与恢复后的数据顺序。检出空读推进指针。 |
+| 单笔 req/ack MCP | 两种快慢钟关系各交付 24 笔，每笔只交付一次。busy 时的额外请求被忽略，在途协调复位后可重新传输。检出重复 dst_valid。 |
+| 开环 toggle 脉冲 | 在约定的事件间距内收到 16 个单周期脉冲。覆盖两个翻转方向及在途协调复位，检出仅检测上升沿造成的丢脉冲。 |
+| 同钟简单双口 RAM | 初始化后覆盖深度 4 的全部地址对及读写使能组合，核对时钟沿前稳定、同步读、同址返回旧值和停读保持。检出写穿透。 |
+| FSM 自检与脚本退出码 | Icarus 和 Verilator 各验证成功、强制失败和超时。另覆盖工具缺失或崩溃、警告策略、显式语言选择、含空格/分号的直接路径和文件名与 latch 单元同名。 |
 
-另外：skill-creator `quick_validate.py` 通过；入口与 README 本地链接检查通过；
-`git diff --check` 通过。入口从 296 行缩短为 88 行，详细规则保留在 `references/15-coding-rules.md`。
-验证器所需 PyYAML 装在一次性临时目录，未修改系统 Python 或项目依赖。
+复现入口见 [Python 回归](../tests/test_regression.py)、[协议计分板](../tests/hdl/) 和 [Makefile](templates/Makefile)。技能入口另用 skill-creator 自带的 `scripts/quick_validate.py` 校验。
 
-## 范围
+## 验证范围
 
-这不是全部模板的完整功能或全参数验证：FIFO/握手/脉冲同步器只执行 lint/结构冒烟。
-未执行 Vivado/Quartus 映射、CDC/RDC、STA、DFT 或硬件验证；Windows/WSL 未在本次重跑。
-CDC 模板要求协调复位与物理约束；依赖条件见模板头和 `references/06-clock-reset-cdc.md`。
-Yosys `stat` 为未映射向量单元统计，不等价于门数、触发器位数或目标器件资源数。
-
-原 2026-08-12 的 WSL 验证叙述已保留在 Git 初始提交 `e7bcd6f` 中，不能当作本次跨平台复测。
+CDC 仿真采用理想时钟和协调复位，验证数字协议。器件 MTBF、Gray skew、bundled-data 最大延迟、级间 STA 以及 SRAM/DSP 物理映射由目标工程报告核验。两级电平同步器、复位同步器和 SV FSM 在本次矩阵中覆盖到 lint 与结构冒烟。工具运行平台为本机，Windows/WSL、商业实现、物理签核和板级测量沿用各自项目的验证流程。

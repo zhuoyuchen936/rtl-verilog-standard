@@ -37,9 +37,9 @@ python3 scripts/rtl_lint.py --sv --top fsm_3seg_sv --synth --strict assets/templ
 ```
 
 `--v2001` 与 `--sv` 互斥；务必按项目显式选择。省略时沿用工具默认解析模式，不能据此声称符合 V2001。
-`--inc DIR`、`--define NAME=VALUE` 可重复，传给两种引擎；`--waiver FILE.vlt` 只用于 Verilator。脚本不解析 filelist；使用项目入口，或准确展开路径、宏和 include，不要只过滤文件名而丢失构建配置。
+`--inc DIR`、`--define NAME=VALUE` 可重复，传给两种引擎。`--waiver FILE.vlt` 用于 Verilator。简单有序源清单可用 `--filelist rtl/rtl.f`，路径相对调用目录，含全局宏和 include。复杂清单使用项目入口。[清单与 Makefile](references/12-toolchain.md#82-共享源清单)
 
-通过条件是进程退出码 0 和已执行检查的通过结论；工具缺失、崩溃、解析失败都不能当成功。`--synth` 使用 Yosys `proc`、锁存器单元断言和 `check -assert`，属于结构冒烟，未映射的单元统计不是门数或物理面积。
+通过条件是进程退出码 0 且所选检查均已执行。`--synth` 在 Yosys `proc` 后检查锁存器，优化前后分别执行 `check -assert`，可在常量折叠前发现驱动冲突。`stat` 为未映射单元统计。
 
 Yosys 内置 SV 前端不能读取全部 SV/厂商 IP。此时用项目目标综合器，或检查可支持子模块，并明确报告范围与未完成项；不要为迁就工具改写正确设计。工具安装、完整实现和签核按任务范围决定，不强制每次小修复都跑 STA/DFT。
 
@@ -59,12 +59,12 @@ Yosys 内置 SV 前端不能读取全部 SV/厂商 IP。此时用项目目标综
 | 组合/时序、赋值与事件调度 | [03-combinational-logic](references/03-combinational-logic.md)、[04-sequential-logic](references/04-sequential-logic.md) |
 | 状态机 | [05-fsm](references/05-fsm.md) |
 | 时钟、复位、CDC/RDC 与约束 | [06-clock-reset-cdc](references/06-clock-reset-cdc.md) |
-| 位宽、符号、流水线 | [07-datapath-and-width](references/07-datapath-and-width.md) |
+| 位宽、符号、定点舍入、算子结构与 II | [07-datapath-and-width](references/07-datapath-and-width.md) |
 | 接口、参数化、ready/valid | [08-hierarchy-and-interface](references/08-hierarchy-and-interface.md) |
-| RAM/ROM/DSP/原语 | [09-memory-and-primitives](references/09-memory-and-primitives.md) |
+| 存储端口、bank、FIFO 和目标映射 | [09-memory-and-primitives](references/09-memory-and-primitives.md) |
 | 自检、断言、回归 | [10-testbench](references/10-testbench.md) |
 | 代码审查 | [11-lint-and-review-checklist](references/11-lint-and-review-checklist.md) |
-| 工具命令与平台限制 | [12-toolchain](references/12-toolchain.md) |
+| 路径诊断、插拍验证、工具命令与平台限制 | [12-toolchain §3.4](references/12-toolchain.md#34-从失败路径选择-rtl-修改) |
 | 教材溯源与争议 | [13-xiayuwen-source](references/13-xiayuwen-source.md)、[14-disputes](references/14-disputes.md) |
 
 历史参考中 `_research/...`、Wxx/Gxx 是原调研索引，本目录不含原始调研档案。需要精确出处时查公开原文，不能把这些索引当成可读取的本地证据。旧参考与本入口冲突时以本入口的适用范围为准。

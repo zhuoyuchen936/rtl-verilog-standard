@@ -36,7 +36,7 @@ python3 scripts/rtl_lint.py --top counter --synth --strict rtl/counter.v
 | 引擎 | 命令 | 查什么 |
 |---|---|---|
 | Verilator | `--lint-only -Wall` | 语法、位宽、敏感表、latch、未驱动/未使用信号、case 覆盖、文件名≠模块名 |
-| Yosys | `hierarchy -check; proc; opt -purge; check -assert; stat` | **真正推断出来的** latch（`$dlatch`）、多驱动网、组合环路，以及门/单元数量 |
+| Yosys | `hierarchy -check`、`proc`、锁存器单元断言、`check -assert`、`opt -purge`、`check -assert`、`stat` | 优化前检查驱动冲突和环路，优化后复查，报告未映射单元 |
 
 为什么必须两个都跑 `[工具]` `[通用]`：Verilator 是**源码级**分析，Yosys 的 `proc` 会把 `always` 块真正展开成寄存器和 MUX，**latch 只有在 `proc` 之后才现形**。一个 lint 干净的文件，`stat` 里冒出 `$dlatch` 是常见事。
 
@@ -111,7 +111,7 @@ OpenTitan 的原话是 Verilator/Verible 做 PR 门禁、商业 AscentLint 每 8
 - [ ] `[ASIC]` 异步复位配了复位同步器（异步置位、同步释放）—— Cummings SNUG 2003 §7.0 原文全大写：*"EVERY ASIC USING AN ASYNCHRONOUS RESET SHOULD INCLUDE A RESET SYNCHRONIZER CIRCUIT!!"*
 - [ ] `[ASIC]` 每个时钟域一套独立的复位同步器与复位树 `[业界]` Cummings SNUG 2003 §11.0
 - [ ] `[ASIC]` 复位路径上除复位同步器和 DFT 旁路 MUX 外没有任何逻辑（复位不参与功能）`[业界]` Cummings SNUG 2003 §10.0
-- [ ] 跨时钟域信号都走了同步器 / 异步 FIFO / 握手，且**同步器输入来自寄存器输出**（不是组合逻辑末端）`[业界]` `[通用]`
+- [ ] 跨域电平、脉冲和总线有匹配的同步协议，片内源端已排除毛刺，外部电平满足采样条件，同步链级间按接收时钟检查
 - [ ] 一个模块只有一个时钟域（例外只有同步器 / 异步 FIFO 模块本身）`[业界]` Cummings SNUG 2001 §6.0 `[通用]`
 
 > **`[FPGA]` 与 `[ASIC]` 在这里是相反的，必须两边都写清楚：**

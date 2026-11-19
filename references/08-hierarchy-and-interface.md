@@ -16,8 +16,7 @@
 2. **参数覆盖只用 `#(.NAME(v))`**；`defparam` 禁用；`` `define `` 不得用于模块参数化。
    对外可调的用 `parameter`，模块内部推导量一律 `localparam`。
 3. **一个模块一个时钟域**（同步器 / 异步 FIFO 是唯一例外）；**跨模块只走寄存器输出**。
-4. **valid/ready 三条硬规则**：valid 拉高后未握手不得撤销；valid 期间 data 必须保持；
-   **`ready` 不得组合依赖同一端口的 `valid`**（协议允许，本规范禁止，理由见 §7.3）。
+4. 同步 valid/ready 接口在时钟沿完成传输。源端独立发出 valid，停顿期间保持有效载荷。接收端可见到 valid 后再响应，见 §6.1。
 5. **ready 是关键路径时插 `skid_buffer.v`**——全寄存、满吞吐、代价是 无背压时 1 拍延迟 + 2 组数据寄存器。
 6. 端口一律 **ANSI 风格**声明，配 `` `default_nettype none ``；**顶层之外不要出现 `inout`**。
 
@@ -373,8 +372,7 @@ endfunction
 
 ### H-4.6 参数合法性检查 `[通用]`
 
-参数是模块与外界的契约。契约被违反时应当**在 elaboration 就失败**，而不是综合出一个
-位宽为 0 或负数的怪物。已验证模板 `assets/templates/v2001/module_skeleton.v` 的做法：
+参数范围可在工程 elaboration 检查中验证，以下模板另在仿真 time 0 检查。用 `vvp -N` 运行这个 V2001 示例，非法值会产生非零退出码。
 
 ```verilog
 // 参数合法性检查：包在 translate_off 里，不进入可综合 RTL
@@ -382,7 +380,7 @@ endfunction
 initial begin
     if (DATA_W <= 0) begin
         $display("ERROR: %m: DATA_W must be positive, got %0d", DATA_W);
-        $finish;
+        $stop;
     end
 end
 // synthesis translate_on
@@ -393,8 +391,7 @@ end
 1. `%m` 会输出**层次路径名**（`[教材]` p.96，R-B11-37：「当一个模块的多个实例执行同一段
    Verilog 代码时，`%m` 选项会区分哪个模块实例在输出」）。参数化模块往往被例化很多次，
    没有 `%m` 你不知道是哪个实例的参数错了。
-2. `$error` / `$fatal` / `assert` 是 SystemVerilog。纯 `[V2001]` 用 `$display` + `$finish`，
-   可移植性最好。
+2. SV 可使用 `$fatal(1, ...)`。V2001 按实际运行器验证失败退出码。
 3. `[业界]` Cummings/Mills/Golson SNUG 2003 §5.2 与 Mills SNUG 2012 §5.0 的共同底线：
    `translate_off` / `` `ifndef SYNTHESIS `` **只允许**包裹仿真专用补丁、断言、覆盖率代码，
    **严禁**用它让综合器和仿真器看到不同的功能逻辑。参数检查属于允许的用法。
@@ -493,10 +490,8 @@ SKILL.md G7。`genvar` 循环在 elaboration 期被**完全展开**，边界必�
 ### H-6.1 握手的三条规则 `[通用]` `[业界]` AXI
 
 1. **传输发生在 `valid && ready` 同时为高的那个时钟沿。**
-2. **`valid` 一旦拉高，在 `ready` 到来之前不得撤销，且 `data` 必须保持不变。**
-   这条是给上游的义务——下游可能正忙，撤销会造成数据丢失。
-3. **`ready` 可以随意变化，不得依赖 `valid`。**
-   这条是给下游的义务：`ready` 不能等看到 `valid` 才拉高，否则两边互相等待就是死锁。
+2. 源端有待发送的数据时独立拉高 `valid`。采样到 `valid && !ready` 后，直到握手沿均保持 `valid`、数据和边带。连续成功传输时，下一拍可换成下一笔数据。
+3. 接收端可以预置 `ready`，也可以在采到 `valid` 后的下一拍拉高 `ready`。跨拍响应是合法的。组合依赖单独按端口的 AXI 接口约束检查，内部 ready/valid 还要检查级联后的组合环和路径长度。[Arm IHI 0051B §2.2](https://documentation-service.arm.com/static/64819f1516f0f201aa6b963c)
 
 ```verilog
 // 正例：合法的握手判定
@@ -509,8 +504,11 @@ end
 ```
 
 ```verilog
-// 反例，不要抄：ready 依赖 valid，与上游的 valid 依赖 ready 撞在一起就死锁
-assign s_ready = s_valid & downstream_ok;
+// 可延迟响应的接收端，先观察 valid，再为下一沿预留一个接收槽。
+// reserve_slot 表示该槽到握手沿都可用。这个示例每笔交易之间可有空拍。
+always @(posedge clk)
+    if (!rst_n || (s_ready && s_valid)) s_ready <= 1'b0;
+    else s_ready <= s_valid && reserve_slot;
 ```
 
 ### H-6.2 组合直通会拖出长路径，要用 skid buffer 打断 `[通用]`
@@ -564,7 +562,7 @@ valid/ready 是**同一时钟域内**的协议。跨时钟域时，这两根线�
 - [ ] `generate` 块都命名了，循环边界是常量，面积已估算
 - [ ] 模块间接口默认 valid/ready 握手，且遵守三条规则
 - [ ] `valid` 拉高后到 `ready` 之前，`data` / `tlast` 保持不变
-- [ ] `ready` 不依赖 `valid`（无组合死锁）
+- [ ] 发送端有数据即可发 valid，接收端预置 ready 和延迟响应都能完成传输，接口边界满足组合路径约束
 - [ ] 长握手链上插了 skid buffer，模块间无组合直通路径
 - [ ] 跨时钟域接口用的是异步 FIFO / MCP 握手，不是裸 valid/ready
 

@@ -44,6 +44,7 @@ module handshake_mcp #(
     reg [WIDTH-1:0] data_q;     // 跨域数据，握手期间保持不动
     reg             req_tgl;
     reg             busy;
+    wire            ack_edge;
 
     always @(posedge src_clk or negedge src_rst_n) begin
         if (!src_rst_n) begin
@@ -98,7 +99,7 @@ module handshake_mcp #(
 
     (* ASYNC_REG = "TRUE" *) reg ack_s1, ack_s2;
     reg ack_s3;
-    wire ack_edge = ack_s2 ^ ack_s3;
+    assign ack_edge = ack_s2 ^ ack_s3;
 
     always @(posedge src_clk or negedge src_rst_n) begin
         if (!src_rst_n) begin

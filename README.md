@@ -7,9 +7,9 @@
 
 - `SKILL.md`：适用范围、核心约束、验证流程和导航。
 - `references/`：15 篇参考，含详细编码条款、CDC、存储器与工具链。
-- `assets/templates/`：10 个 RTL 模板、1 个自检 testbench。
+- `assets/templates/` 提供 10 个 RTL 模板、1 个自检 testbench 和一个 Makefile。
 - `scripts/rtl_lint.py`：Verilator lint 和可选 Yosys 结构冒烟。
-- `tests/test_regression.py`：退出码、构建参数、模板和 TB 失败路径回归。
+- `tests/test_regression.py` 运行退出码、真实构建、数值与模板行为回归。`tests/hdl/` 内的计分板既跑原模板，也跑临时注入错误的副本。
 - [验证记录](assets/VERIFICATION.md)：当前工具版本、实跑结果与未覆盖范围。
 
 ## 运行
@@ -24,8 +24,7 @@ python3 scripts/rtl_lint.py --sv --top fsm_3seg_sv --strict --synth assets/templ
 python3 -m unittest discover -s tests -v
 ```
 
-`--inc`、`--define` 同时传给两个引擎；`--waiver` 只传给 Verilator。
-不直接解析 `.f`，不要在展开清单时丢失宏、include 或相对路径语义。
+`--inc`、`--define` 同时传给两个引擎。项目根目录下的简单清单可用 `--filelist rtl/rtl.f`，维护同一套路径、宏和 include。`--waiver` 传给 Verilator。可复制的构建入口见 [Makefile](assets/templates/Makefile)。
 工具缺失时回归会明确 skip；skip 不是对应能力已经通过的证据。
 
 ## 来源与范围
@@ -34,7 +33,6 @@ python3 -m unittest discover -s tests -v
 原始 `_research` 调研档案不在此目录，本次未重新取得教材扫描件；历史交叉审查叙述不作为当前可复现证据。
 命令与 CDC 更新所用公开官方来源在相应参考文档中。
 
-当前验证覆盖 lint、结构冒烟及 FSM TB，不替代其他模板的完整功能验证、目标器件映射、
-CDC/RDC、STA 或 DFT。Quartus 历史条目仍有未逐字核实的部分。
+当前验证覆盖 lint、结构冒烟、FSM 自检、协议计分板和示例中的整除算术。CDC 模板的物理约束、目标器件映射和 STA 在具体工程中核验。Quartus 历史条目按使用版本核对。
 
 教材与引用版权归各原作者/出版方。本目录沿用团队内部使用许可。

@@ -217,6 +217,8 @@ end
 
 ### R-10-12 RTL 与参考模型比对 `[通用]` `[教材]` p.491
 
+协议计分板只在接口真正接收时入队、在交付时核对顺序和值。背压期间独立检查 valid 和载荷稳定。复位按模块契约丢弃在途事务。可直接参考[弹性流水](../tests/hdl/tb_ready_valid.sv)、[双钟 FIFO](../tests/hdl/tb_async_fifo.sv)、[MCP](../tests/hdl/tb_handshake_mcp.sv)、[toggle 脉冲](../tests/hdl/tb_pulse_sync.sv)及[同步 RAM](../tests/hdl/tb_sdp_ram.sv)的自检。每个测试对临时损坏的实现也执行行为检查。
+
 大型设计要走"RTL 与算法 C 模型逐用例比对"的闭环，所有用例回归通过才算前仿结束。
 `[工具]` Verilator 的 C++ testbench 天然适合做这件事；cocotb 则可以用 Python 写参考模型。
 
